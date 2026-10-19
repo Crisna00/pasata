@@ -17,15 +17,21 @@ import (
 
 	"strings"
 
+	"sync"
+
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/joho/godotenv"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type App struct {
-	DB *pgxpool.Pool
+	DB         *pgxpool.Pool
+	Sessions   map[string]AuthSession
+	SessionsMu sync.RWMutex
 }
 
 type Warehouse struct {
@@ -68,6 +74,9 @@ type WarehouseInput struct {
 
 func main() {
 
+	if err := godotenv.Load(); err != nil {
+		log.Println("File .env tidak ditemukan, menggunakan environment variable sistem")
+	}
 	databaseURL := os.Getenv("DATABASE_URL")
 
 	if databaseURL == "" {
@@ -98,19 +107,27 @@ func main() {
 
 	log.Println("Berhasil terhubung ke PostgreSQL!")
 
-	app := &App{DB: db}
+	app := &App{DB: db, Sessions: make(map[string]AuthSession)}
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/health", app.healthHandler)
+	mux.HandleFunc("/api/auth/bootstrap", app.authBootstrapHandler)
+	mux.HandleFunc("/api/auth/login", app.authLoginHandler)
+	mux.HandleFunc("/api/auth/register", app.authRegisterHandler)
+	mux.HandleFunc("/api/auth/logout", app.authLogoutHandler)
+	mux.HandleFunc("/api/auth/me", app.authMeHandler)
+	mux.HandleFunc("/api/auth/roles", app.authRolesHandler)
 
 	mux.HandleFunc("/api/warehouses", app.warehousesHandler)
 
 	mux.HandleFunc("/api/warehouses/", app.warehouseDetailHandler)
 
 	mux.HandleFunc("/api/warehouse-areas", app.warehouseAreasHandler)
+	mux.HandleFunc("/api/warehouse-areas/", app.warehouseAreasHandler)
 
 	mux.HandleFunc("/api/cold-storages", app.coldStoragesHandler)
+	mux.HandleFunc("/api/cold-storages/", app.coldStoragesHandler)
 
 	mux.HandleFunc("/api/racks", app.racksHandler)
 
@@ -121,13 +138,23 @@ func main() {
 	mux.HandleFunc("/api/rack-levels/", app.rackLevelsHandler)
 	mux.HandleFunc("/api/rack-slots/", app.rackSlotsHandler)
 	mux.HandleFunc("/api/pallets", app.palletsCRUD)
+	mux.HandleFunc("/api/pallets/", app.palletDetailCRUD)
+	mux.HandleFunc("/api/skus", app.skusHandler)
+	mux.HandleFunc("/api/skus/", app.skusHandler)
+	mux.HandleFunc("/api/pallet-items", app.palletItemsHandler)
+	mux.HandleFunc("/api/pallet-item-outbound", app.palletItemOutboundHandler)
 	mux.HandleFunc("/api/pallet-move", app.movePallet)
+	mux.HandleFunc("/api/monitoring/summary", app.monitoringSummaryHandler)
+	mux.HandleFunc("/api/monitoring/fifo", app.monitoringFIFOHandler)
+	mux.HandleFunc("/api/slot-recommendations", app.slotRecommendationsHandler)
+	mux.HandleFunc("/api/pallet-movements", app.palletMovementsHandler)
+	mux.HandleFunc("/api/pallet-history", app.palletHistoryHandler)
 
 	server := &http.Server{
 
 		Addr: ":8080",
 
-		Handler: cors(mux),
+		Handler: cors(app.authMiddleware(mux)),
 
 		ReadHeaderTimeout: 5 * time.Second,
 	}

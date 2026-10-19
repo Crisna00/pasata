@@ -35,7 +35,10 @@ import (
 // create or alter database tables.
 
 func (a *App) warehouseAreasHandler(w http.ResponseWriter, r *http.Request) {
-
+	if r.Method != http.MethodGet || r.URL.Path != "/api/warehouse-areas" {
+		a.warehouseAreasCRUD(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 
 		w.Header().Set("Allow", "GET")
@@ -144,7 +147,10 @@ func (a *App) warehouseAreasHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) coldStoragesHandler(w http.ResponseWriter, r *http.Request) {
-
+	if r.Method != http.MethodGet || r.URL.Path != "/api/cold-storages" {
+		a.coldStoragesCRUD(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 
 		w.Header().Set("Allow", "GET")
@@ -497,10 +503,15 @@ func (a *App) rackSlotsHandler(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.DB.Query(ctx, `
 
         SELECT s.id, s.rack_level_id, s.slot_number, s.code, s.capacity_kg,
-               CASE WHEN p.id IS NOT NULL THEN 'OCCUPIED' ELSE s.status END,
+               CASE WHEN p.id IS NOT NULL AND s.status='EMPTY' THEN 'OCCUPIED' ELSE s.status END,
                s.created_at, s.updated_at, p.id, p.pallet_code, p.status
-        FROM rack_slots s LEFT JOIN pallets p ON p.current_slot_id=s.id
-        WHERE s.rack_level_id = $1 ORDER BY s.slot_number`, levelID)
+        FROM rack_slots s
+        JOIN rack_levels rl ON rl.id=s.rack_level_id
+        JOIN racks r ON r.id=rl.rack_id
+        LEFT JOIN pallets p ON p.current_slot_id=s.id
+        WHERE s.rack_level_id = $1
+          AND s.slot_number <= r.capacity_pallet
+        ORDER BY s.slot_number`, levelID)
 
 	if err != nil {
 
