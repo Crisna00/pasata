@@ -143,12 +143,16 @@ func main() {
 	mux.HandleFunc("/api/skus/", app.skusHandler)
 	mux.HandleFunc("/api/pallet-items", app.palletItemsHandler)
 	mux.HandleFunc("/api/pallet-item-outbound", app.palletItemOutboundHandler)
+	mux.HandleFunc("/api/outbound-transactions", app.outboundTransactionsHandler)
+	mux.HandleFunc("/api/outbound-transactions/", app.outboundTransactionActionHandler)
 	mux.HandleFunc("/api/pallet-move", app.movePallet)
 	mux.HandleFunc("/api/monitoring/summary", app.monitoringSummaryHandler)
 	mux.HandleFunc("/api/monitoring/fifo", app.monitoringFIFOHandler)
 	mux.HandleFunc("/api/slot-recommendations", app.slotRecommendationsHandler)
 	mux.HandleFunc("/api/pallet-movements", app.palletMovementsHandler)
-	mux.HandleFunc("/api/pallet-history", app.palletHistoryHandler)
+	mux.HandleFunc("/api/inbound-slots", app.inboundSlotsHandler)
+	mux.HandleFunc("/api/inbound-transactions", app.inboundTransactionsHandler)
+	mux.HandleFunc("/api/inbound-transactions/", app.inboundTransactionActionHandler)
 
 	server := &http.Server{
 

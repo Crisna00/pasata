@@ -1,4 +1,4 @@
-import 'dart:convert';
+ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
@@ -826,7 +826,6 @@ class PasataNavigationDrawer extends StatelessWidget {
       case 'Master Pallet': page = const MasterPalletPage(); break;
       case 'Pallet Content': page = const PalletContentPage(); break;
       case 'Stock & Physical Summary': page = const StockPhysicalSummaryPage(); break;
-      case 'Riwayat Pallet': page = const PalletHistoryPage(); break;
       case 'Master SKU': page = const MasterSkuPage(); break;
       case 'Scanner & Validasi SKU': page = const ScannerValidasiSkuPage(); break;
       case 'Barang Masuk': page = const InboundPage(); break;
@@ -864,7 +863,6 @@ class PasataNavigationDrawer extends StatelessWidget {
         _item(context, 'Master Pallet', Icons.view_module_outlined),
         _item(context, 'Pallet Content', Icons.inventory_2_outlined),
         _item(context, 'Stock & Physical Summary', Icons.summarize_outlined),
-        _item(context, 'Riwayat Pallet', Icons.history_rounded),
         _item(context, 'Master SKU', Icons.qr_code_2_outlined),
         _item(context, 'Scanner & Validasi SKU', Icons.document_scanner_outlined),
         _item(context, 'Barang Masuk', Icons.south_west_rounded),
@@ -1099,100 +1097,980 @@ class DashboardPage extends StatelessWidget {
   }
 }
 
-class InboundPage extends StatelessWidget {
+class InboundPage extends StatefulWidget {
   final int? palletId;
   final String? palletCode;
   const InboundPage({super.key, this.palletId, this.palletCode});
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Barang Masuk / Inbound')),
-    drawer: const PasataNavigationDrawer(activeMenu: 'Barang Masuk'),
-    body: Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 520),
-        child: Card(
-          elevation: 0,
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(
-                  Icons.south_west_rounded,
-                  size: 48,
-                  color: Color(0xFF176B52),
-                ),
-                const SizedBox(height: 12),
-                const Text(
-                  'Modul Inbound',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  palletId == null
-                      ? 'Pilih atau buat transaksi barang masuk di modul ini.'
-                      : 'Pallet terpilih: ${palletCode ?? palletId}',
-                ),
-                const SizedBox(height: 12),
-                const Text(
-                  'Halaman sudah terhubung dari menu dan detail pallet. Form transaksi inbound dan penyimpanan transaksi masih perlu dilanjutkan.',
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
+  State<InboundPage> createState() => _InboundPageState();
 }
 
-class OutboundPage extends StatelessWidget {
+class _InboundPageState extends State<InboundPage> {
+  bool loading = true, saving = false;
+  String? error;
+  List<Map<String,dynamic>> warehouses=[], skus=[], pallets=[], slots=[], transactions=[];
+  int? warehouseId, selectedPalletId, selectedSkuId, selectedSlotId;
+  final supplier = TextEditingController(), refDoc = TextEditingController(), plate = TextEditingController(), driver = TextEditingController(), notes = TextEditingController();
+  final batch = TextEditingController(), expiry = TextEditingController(), qtyExpected = TextEditingController(text:'0'), qtyReceived = TextEditingController(text:'1'), weight = TextEditingController(text:'0'), packagingQty = TextEditingController(text:'0'), temp = TextEditingController(), itemNotes = TextEditingController();
+  String packagingType='CARTON', condition='GOOD';
+  Map<String,dynamic>? activeTx, detail;
+  final Map<int,bool> checklistState={};
+  @override void initState(){super.initState();if(widget.palletId!=null)selectedPalletId=widget.palletId;loadCatalog();}
+  @override void dispose(){for(final c in [supplier,refDoc,plate,driver,notes,batch,expiry,qtyExpected,qtyReceived,weight,packagingQty,temp,itemNotes]){c.dispose();}super.dispose();}
+  Future<dynamic> api(String path,{String method='GET',Map<String,dynamic>? body}) async {final uri=Uri.parse('$apiBaseUrl/$path');late http.Response r;final encoded=body==null?null:jsonEncode(body);if(method=='POST'){r=await http.post(uri,headers:apiHeaders,body:encoded).timeout(const Duration(seconds:20));}else if(method=='PUT'){r=await http.put(uri,headers:apiHeaders,body:encoded).timeout(const Duration(seconds:20));}else{r=await http.get(uri,headers:apiHeaders).timeout(const Duration(seconds:20));}dynamic data;try{data=jsonDecode(r.body);}catch(_){data=r.body;}if(r.statusCode<200||r.statusCode>=300){final msg=data is Map?(data['error']??data['detail']??data['message']??r.body):data.toString();throw Exception('$msg (HTTP ${r.statusCode})');}return data;}
+  void toast(String s){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(s)));}
+  Future<void> loadCatalog() async {
+    if (mounted) setState(() { loading = true; error = null; });
+    try {
+      // Ambil katalog dari endpoint yang memang terdaftar di backend.
+      // Backend tidak memiliki endpoint /inbound-catalog; memanggilnya menyebabkan HTTP 404.
+      // Endpoint /api/rack-slots wajib menerima rack_level_id. Untuk inbound,
+      // gunakan endpoint khusus yang memang mengembalikan slot EMPTY per gudang.
+      final catalog = await Future.wait([
+        api('warehouses'),
+        api('skus'),
+        api('pallets'),
+      ]);
+      warehouses = List<Map<String, dynamic>>.from(catalog[0] as List);
+      skus = List<Map<String, dynamic>>.from(catalog[1] as List);
+      pallets = List<Map<String, dynamic>>.from(catalog[2] as List);
+      if (warehouseId == null && warehouses.isNotEmpty) {
+        warehouseId = (warehouses.first['id'] as num).toInt();
+      }
+      slots = warehouseId == null
+          ? <Map<String, dynamic>>[]
+          : List<Map<String, dynamic>>.from(
+              await api('inbound-slots?warehouse_id=$warehouseId') as List,
+            );
+      await loadTransactions(showLoading: false);
+    } catch (e) {
+      error = e.toString();
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+  Future<void> loadTransactions({bool showLoading=true}) async {if(showLoading&&mounted)setState(()=>loading=true);try{transactions=List<Map<String,dynamic>>.from(await api('inbound-transactions'));}catch(e){error=e.toString();}if(showLoading&&mounted)setState(()=>loading=false);}
+  Future<void> createTransaction() async {
+    if (warehouseId == null || supplier.text.trim().isEmpty) {
+      toast('Pilih gudang dan isi nama pemasok.');
+      return;
+    }
+    if (selectedSkuId == null) {
+      toast('Pilih minimal satu SKU untuk barang inbound.');
+      return;
+    }
+    final q = double.tryParse(qtyReceived.text) ?? 0;
+    final w = double.tryParse(weight.text) ?? -1;
+    final pq = int.tryParse(packagingQty.text) ?? -1;
+    final qe = double.tryParse(qtyExpected.text) ?? 0;
+    if (q <= 0 || w < 0 || pq < 0 || qe < 0) {
+      toast('Qty diterima harus lebih dari 0; qty, berat, dan packaging tidak boleh negatif.');
+      return;
+    }
+    final item = <String, dynamic>{
+      'sku_id': selectedSkuId,
+      'pallet_id': selectedPalletId,
+      'rack_slot_id': selectedSlotId,
+      'batch_no': batch.text.trim(),
+      'expiry_date': expiry.text.trim(),
+      'packaging_type': packagingType,
+      'packaging_qty': pq,
+      'qty_expected': qe,
+      'qty_received': q,
+      'weight_kg': w,
+      'condition': condition,
+      'notes': itemNotes.text.trim(),
+    };
+    if (temp.text.trim().isNotEmpty) {
+      final parsedTemp = double.tryParse(temp.text.trim());
+      if (parsedTemp == null) {
+        toast('Suhu saat tiba harus berupa angka.');
+        return;
+      }
+      item['arrival_temp'] = parsedTemp;
+    }
+
+    setState(() => saving = true);
+    try {
+      final d = Map<String, dynamic>.from(await api(
+        'inbound-transactions',
+        method: 'POST',
+        body: {
+          'warehouse_id': warehouseId,
+          'supplier_name': supplier.text.trim(),
+          'reference_doc_no': refDoc.text.trim(),
+          'truck_plate': plate.text.trim(),
+          'driver_name': driver.text.trim(),
+          'notes': notes.text.trim(),
+          'arrived_at': DateTime.now().toUtc().toIso8601String(),
+          'items': [item],
+        },
+      ));
+      activeTx = d;
+      await refreshDetail();
+      await loadTransactions(showLoading: false);
+      toast('Inbound ${d['transaction_no']} dibuat dengan 1 item.');
+    } catch (e) {
+      toast('Gagal membuat inbound: $e');
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
+  }
+  Future<void> refreshDetail() async {if(activeTx==null)return;try{detail=Map<String,dynamic>.from(await api('inbound-transactions/${activeTx!['id']}/detail'));checklistState.clear();for(final c in List<Map<String,dynamic>>.from(detail!['checklist']??[])){checklistState[(c['id'] as num).toInt()]=c['is_passed']==true;}}catch(e){toast('Gagal memuat detail: $e');}if(mounted)setState((){});}
+  Future<void> addItem() async {if(activeTx==null||selectedSkuId==null){toast('Pilih SKU.');return;}final q=double.tryParse(qtyReceived.text)??0,w=double.tryParse(weight.text)??-1,pq=int.tryParse(packagingQty.text)??-1,qe=double.tryParse(qtyExpected.text)??0;if(q<=0||w<0||pq<0||qe<0){toast('Jumlah diterima harus > 0. Jumlah, berat, packaging tidak boleh negatif.');return;}setState(()=>saving=true);try{final body=<String,dynamic>{'sku_id':selectedSkuId,'pallet_id':selectedPalletId,'rack_slot_id':selectedSlotId,'batch_no':batch.text.trim(),'expiry_date':expiry.text.trim(),'packaging_type':packagingType,'packaging_qty':pq,'qty_expected':qe,'qty_received':q,'weight_kg':w,'condition':condition,'notes':itemNotes.text.trim()};if(temp.text.trim().isNotEmpty)body['arrival_temp']=double.parse(temp.text.trim());await api('inbound-transactions/${activeTx!['id']}/items',method:'POST',body:body);await refreshDetail();await loadCatalog();toast(selectedSlotId==null?'Item tersimpan dengan status Unplaced.':'Item inbound tersimpan.');}catch(e){toast('Gagal menambah item: $e');}finally{if(mounted)setState(()=>saving=false);}}
+  Future<void> saveChecklist(int id,bool value) async {try{await api('inbound-transactions/${activeTx!['id']}/checklist',method:'PUT',body:{'items':[{'id':id,'is_passed':value,'notes':''}]});checklistState[id]=value;await refreshDetail();}catch(e){toast('Gagal menyimpan checklist: $e');}}
+  Future<void> submitTx() async {
+    if (activeTx == null) return;
+
+    // Jangan approve jika checklist masih ada yang belum lolos.
+    final checklist = List<Map<String, dynamic>>.from(detail?['checklist'] ?? []);
+    if (checklist.isEmpty || checklist.any((c) => c['is_passed'] != true)) {
+      toast('Semua checklist harus lolos sebelum inbound disetujui.');
+      return;
+    }
+
+    setState(() => saving = true);
+    try {
+      await api(
+        'inbound-transactions/${activeTx!['id']}/approve',
+        method: 'POST',
+        body: {},
+      );
+      toast('Inbound berhasil disetujui dan stok diperbarui.');
+      activeTx = null;
+      detail = null;
+      await loadTransactions();
+    } catch (e) {
+      toast('Belum bisa menyetujui inbound: $e');
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
+  }
+
+  Future<void> rejectTx() async {
+    if (activeTx == null) return;
+
+    final reasonController = TextEditingController();
+    final reason = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Tolak inbound'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Masukkan alasan penolakan agar dapat ditindaklanjuti.'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reasonController,
+              autofocus: true,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                labelText: 'Alasan penolakan *',
+                hintText: 'Contoh: jumlah barang tidak sesuai',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.red.shade700,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () {
+              final value = reasonController.text.trim();
+              if (value.isEmpty) {
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  const SnackBar(content: Text('Alasan penolakan wajib diisi.')),
+                );
+                return;
+              }
+              Navigator.pop(dialogContext, value);
+            },
+            child: const Text('Tolak inbound'),
+          ),
+        ],
+      ),
+    );
+    reasonController.dispose();
+
+    if (reason == null || reason.trim().isEmpty || activeTx == null) return;
+
+    setState(() => saving = true);
+    try {
+      await api(
+        'inbound-transactions/${activeTx!['id']}/reject',
+        method: 'POST',
+        body: {'reason': reason.trim()},
+      );
+      toast('Inbound berhasil ditolak.');
+      activeTx = null;
+      detail = null;
+      await loadTransactions();
+    } catch (e) {
+      toast('Gagal menolak inbound: $e');
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
+  }
+  Future<void> openTx(Map<String,dynamic> tx) async {activeTx=tx;await refreshDetail();}
+  List<Map<String,dynamic>> get warehousePallets=>pallets.where((p)=>(p['warehouse_id'] as num?)?.toInt()==warehouseId&&p['status']!='INACTIVE').toList();
+  List<Map<String,dynamic>> get warehouseSlots=>slots.where((s)=>(s['warehouse_id'] as num?)?.toInt()==warehouseId).toList();
+  Widget field(String label,TextEditingController c,{String? hint,TextInputType type=TextInputType.text})=>Padding(padding:const EdgeInsets.only(bottom:12),child:TextField(controller:c,keyboardType:type,decoration:InputDecoration(labelText:label,hintText:hint,border:const OutlineInputBorder(),isDense:true)));
+  Widget dropdown(String label,int? value,List<Map<String,dynamic>> items,String idKey,String labelKey,ValueChanged<int?> onChanged,{bool enabled=true})=>Padding(padding:const EdgeInsets.only(bottom:12),child:DropdownButtonFormField<int>(value:items.any((e)=>(e[idKey] as num?)?.toInt()==value)?value:null,isExpanded:true,decoration:InputDecoration(labelText:label,border:const OutlineInputBorder(),isDense:true),items:items.map((e)=>DropdownMenuItem<int>(value:(e[idKey] as num).toInt(),child:Text('${e[labelKey]??'-'}',overflow:TextOverflow.ellipsis))).toList(),onChanged:enabled?onChanged:null));
+  Widget section(String title,Widget child)=>Card(margin:const EdgeInsets.only(bottom:14),child:Padding(padding:const EdgeInsets.all(16),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(title,style:const TextStyle(fontSize:17,fontWeight:FontWeight.bold)),const SizedBox(height:14),child])));
+  @override
+  Widget build(BuildContext context) {
+    final tx = activeTx;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Gateway Inbound'),
+        actions: [
+          IconButton(
+            onPressed: loadCatalog,
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Muat ulang',
+          ),
+        ],
+      ),
+      drawer: const PasataNavigationDrawer(activeMenu: 'Barang Masuk'),
+      body: loading
+          ? const Center(child: CircularProgressIndicator())
+          : error != null && warehouses.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(error!, textAlign: TextAlign.center),
+                        const SizedBox(height: 12),
+                        FilledButton(
+                          onPressed: loadCatalog,
+                          child: const Text('Coba lagi'),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : ListView(
+                  padding: const EdgeInsets.all(16),
+                  children: [
+                    if (tx == null) ...[
+                      section(
+                        'Registrasi kedatangan',
+                        Column(
+                          children: [
+                            dropdown(
+                              'Gudang',
+                              warehouseId,
+                              warehouses,
+                              'id',
+                              'name',
+                              (v) async {
+                                setState(() => warehouseId = v);
+                                if (v == null) {
+                                  setState(() => slots = []);
+                                  return;
+                                }
+                                try {
+                                  final result = await api('inbound-slots?warehouse_id=$v');
+                                  if (mounted) setState(() => slots = List<Map<String, dynamic>>.from(result as List));
+                                } catch (e) {
+                                  toast('Gagal memuat slot inbound: $e');
+                                }
+                              },
+                            ),
+                            field('Nama pemasok *', supplier),
+                            field('No. surat jalan / PO', refDoc),
+                            field('Nomor kendaraan', plate),
+                            field('Nama pengemudi', driver),
+                            field('Catatan kedatangan', notes),
+                            const Divider(height: 28),
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                'Barang inbound (minimal 1 item)',
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            dropdown(
+                              'SKU *', selectedSkuId, skus, 'id', 'name',
+                              (v) => setState(() => selectedSkuId = v),
+                            ),
+                            dropdown(
+                              'Pallet (opsional)', selectedPalletId, warehousePallets,
+                              'id', 'pallet_code',
+                              (v) => setState(() => selectedPalletId = v),
+                            ),
+                            dropdown(
+                              'Lokasi slot (opsional)', selectedSlotId, warehouseSlots,
+                              'id', 'code',
+                              (v) => setState(() => selectedSlotId = v),
+                            ),
+                            field('Nomor batch', batch),
+                            field('Tanggal kedaluwarsa (YYYY-MM-DD)', expiry),
+                            Row(
+                              children: [
+                                Expanded(child: field('Qty rencana', qtyExpected, type: TextInputType.number)),
+                                const SizedBox(width: 8),
+                                Expanded(child: field('Qty diterima *', qtyReceived, type: const TextInputType.numberWithOptions(decimal: true))),
+                              ],
+                            ),
+                            Row(
+                              children: [
+                                Expanded(child: field('Berat (kg) *', weight, type: const TextInputType.numberWithOptions(decimal: true))),
+                                const SizedBox(width: 8),
+                                Expanded(child: field('Jumlah packaging', packagingQty, type: TextInputType.number)),
+                              ],
+                            ),
+                            DropdownButtonFormField<String>(
+                              value: packagingType,
+                              decoration: const InputDecoration(labelText: 'Jenis packaging', border: OutlineInputBorder(), isDense: true),
+                              items: const ['CARTON', 'SACK', 'BOX', 'OTHER'].map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
+                              onChanged: (v) => setState(() => packagingType = v ?? 'CARTON'),
+                            ),
+                            const SizedBox(height: 12),
+                            DropdownButtonFormField<String>(
+                              value: condition,
+                              decoration: const InputDecoration(labelText: 'Kondisi barang', border: OutlineInputBorder(), isDense: true),
+                              items: const ['GOOD', 'DAMAGED', 'EXPIRED', 'TEMP_DEVIATION'].map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
+                              onChanged: (v) => setState(() => condition = v ?? 'GOOD'),
+                            ),
+                            const SizedBox(height: 12),
+                            field('Suhu saat tiba (°C)', temp, type: const TextInputType.numberWithOptions(decimal: true)),
+                            field('Catatan item', itemNotes),
+                            SizedBox(
+                              width: double.infinity,
+                              child: FilledButton.icon(
+                                onPressed: saving ? null : createTransaction,
+                                icon: const Icon(Icons.add_box_outlined),
+                                label: Text(
+                                  saving
+                                      ? 'Menyimpan...'
+                                      : 'Buat registrasi inbound',
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      section(
+                        'Riwayat registrasi inbound',
+                        transactions.isEmpty
+                            ? const Text('Belum ada transaksi inbound.')
+                            : Column(
+                                children: transactions.map((t) {
+                                  return ListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    leading: const Icon(
+                                      Icons.move_to_inbox_outlined,
+                                    ),
+                                    title: Text(
+                                      '${t['transaction_no']} · ${t['supplier_name']}',
+                                    ),
+                                    subtitle: Text(
+                                      '${t['warehouse_name']} • ${t['status']} • ${t['item_count']} item',
+                                    ),
+                                    trailing: const Icon(Icons.chevron_right),
+                                    onTap: () => openTx(t),
+                                  );
+                                }).toList(),
+                              ),
+                      ),
+                    ] else ...[
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '${tx['transaction_no']}\n'
+                              '${tx['supplier_name']} · ${tx['status']}',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                              ),
+                            ),
+                          ),
+                          TextButton.icon(
+                            onPressed: () {
+                              setState(() {
+                                activeTx = null;
+                                detail = null;
+                              });
+                            },
+                            icon: const Icon(Icons.arrow_back),
+                            label: const Text('Daftar'),
+                          ),
+                        ],
+                      ),
+                      section(
+                        'Registrasi barang',
+                        const Text(
+                          'Barang pada transaksi ini dikirim saat registrasi dibuat. '
+                          'Untuk menambah baris barang tambahan, backend perlu menyediakan '
+                          'endpoint tambah item khusus; endpoint tersebut belum tersedia pada API saat ini.',
+                        ),
+                      ),
+                      section(
+                        'Barang yang diregistrasi',
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ...List<Map<String, dynamic>>.from(
+                              detail?['items'] ?? [],
+                            ).map((i) {
+                              return ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: const Icon(
+                                  Icons.inventory_2_outlined,
+                                ),
+                                title: Text(
+                                  '${i['sku_code']} · ${i['sku_name']}',
+                                ),
+                                subtitle: Text(
+                                  'Qty ${i['qty_received']} • '
+                                  '${i['weight_kg']} kg • '
+                                  '${i['packaging_type']} ${i['packaging_qty']} • '
+                                  'Batch ${i['batch_no'] ?? '-'}\n'
+                                  'Pallet ${i['pallet_code'] ?? '-'} • '
+                                  'Lokasi ${i['slot_code'] ?? 'UNPLACED'}',
+                                ),
+                                isThreeLine: true,
+                              );
+                            }),
+                            if ((detail?['items'] as List? ?? []).isEmpty)
+                              const Text('Belum ada item.'),
+                          ],
+                        ),
+                      ),
+                      section(
+                        'Checklist inbound (semua harus lolos)',
+                        Column(
+                          children: [
+                            ...List<Map<String, dynamic>>.from(
+                              detail?['checklist'] ?? [],
+                            ).map((c) {
+                              final id = (c['id'] as num).toInt();
+
+                              return CheckboxListTile(
+                                contentPadding: EdgeInsets.zero,
+                                value: checklistState[id] ?? false,
+                                title: Text(c['checklist_item'].toString()),
+                                subtitle: c['is_passed'] == true
+                                    ? const Text('Lolos tersimpan')
+                                    : null,
+                                onChanged: (v) =>
+                                    saveChecklist(id, v ?? false),
+                              );
+                            }),
+                            if ((tx['status'] ?? '').toString() == 'WAITING_VERIFICATION') ...[
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: OutlinedButton.icon(
+                                      onPressed: saving ? null : rejectTx,
+                                      style: OutlinedButton.styleFrom(
+                                        foregroundColor: Colors.red.shade700,
+                                        side: BorderSide(color: Colors.red.shade700),
+                                        padding: const EdgeInsets.symmetric(vertical: 14),
+                                      ),
+                                      icon: const Icon(Icons.cancel_outlined),
+                                      label: const Text('Reject'),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: FilledButton.icon(
+                                      onPressed: saving ? null : submitTx,
+                                      icon: const Icon(Icons.check_circle_outline),
+                                      label: const Text('Approve & proses stok'),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ] else
+                              Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: Colors.grey.shade100,
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Text(
+                                  'Transaksi ini berstatus ${tx['status']}. Aksi approve/reject hanya tersedia saat menunggu verifikasi.',
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                            const SizedBox(height: 8),
+                            const Text(
+                              'Persetujuan hanya dapat dilakukan oleh Warehouse Supervisor/Admin. '
+                              'Semua checklist harus lolos sebelum stok diproses.',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+    );
+  }
+}
+
+class OutboundPage extends StatefulWidget {
   final int? palletId;
   final String? palletCode;
   const OutboundPage({super.key, this.palletId, this.palletCode});
+
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Barang Keluar / Outbound')),
-    drawer: const PasataNavigationDrawer(activeMenu: 'Barang Keluar'),
-    body: Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 520),
-        child: Card(
-          elevation: 0,
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(
-                  Icons.north_east_rounded,
-                  size: 48,
-                  color: Color(0xFF176B52),
-                ),
-                const SizedBox(height: 12),
-                const Text(
-                  'Modul Outbound',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  palletId == null
-                      ? 'Pilih pallet untuk proses barang keluar.'
-                      : 'Pallet terpilih: ${palletCode ?? palletId}',
-                ),
-                const SizedBox(height: 12),
-                const Text(
-                  'Halaman sudah terhubung dari menu dan detail pallet. Form transaksi outbound, FIFO, dan konfirmasi pengeluaran masih perlu dilanjutkan.',
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
+  State<OutboundPage> createState() => _OutboundPageState();
+}
+
+class _OutboundPageState extends State<OutboundPage> {
+  bool loading = true;
+  bool saving = false;
+  bool fullOutbound = true;
+  String? error;
+  String search = '';
+  List<Map<String, dynamic>> pallets = [];
+  List<Map<String, dynamic>> stockItems = [];
+  Map<String, dynamic>? selectedItem;
+  final quantityController = TextEditingController();
+  final weightController = TextEditingController();
+  final notesController = TextEditingController();
+  final Map<String, bool> checks = {
+    'SKU dan pallet sesuai permintaan': false,
+    'Jumlah dan berat sudah diverifikasi': false,
+    'Kondisi barang dan kemasan diperiksa': false,
+    'Lokasi pengambilan sudah sesuai': false,
+  };
+
+  int _int(Map<String, dynamic> row, String key, [int fallback = 0]) {
+    final value = row[key];
+    if (value is num) return value.toInt();
+    return int.tryParse('$value') ?? fallback;
+  }
+
+  double _double(Map<String, dynamic> row, String key) {
+    final value = row[key];
+    if (value is num) return value.toDouble();
+    return double.tryParse('$value') ?? 0;
+  }
+
+  String _str(Map<String, dynamic> row, String key, [String fallback = '-']) {
+    final value = row[key];
+    if (value == null || '$value'.trim().isEmpty) return fallback;
+    return '$value';
+  }
+
+  String _palletCode(Map<String, dynamic> item) {
+    final palletId = _int(item, 'pallet_id');
+    final pallet = pallets.where((p) => _int(p, 'id') == palletId).toList();
+    if (pallet.isNotEmpty) return _str(pallet.first, 'pallet_code', 'Pallet $palletId');
+    return 'Pallet $palletId';
+  }
+
+  String _location(Map<String, dynamic> item) {
+    final palletId = _int(item, 'pallet_id');
+    final pallet = pallets.where((p) => _int(p, 'id') == palletId).toList();
+    if (pallet.isEmpty) return 'Lokasi tidak tersedia';
+    final p = pallet.first;
+    for (final key in ['slot_code', 'current_slot_code', 'location_code', 'slot_label', 'location']) {
+      final value = p[key];
+      if (value != null && '$value'.trim().isNotEmpty) return '$value';
+    }
+    final slotId = p['current_slot_id'];
+    if (slotId == null) return 'UNPLACED';
+    return 'Slot ID $slotId';
+  }
+
+  Future<List<Map<String, dynamic>>> _getList(String path) async {
+    final response = await http
+        .get(Uri.parse('$apiBaseUrl/$path'), headers: apiHeaders)
+        .timeout(const Duration(seconds: 20));
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(response.body);
+    } catch (_) {
+      decoded = response.body;
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final message = decoded is Map
+          ? (decoded['error'] ?? decoded['message'] ?? decoded['detail'] ?? response.body)
+          : decoded.toString();
+      throw Exception('$message (HTTP ${response.statusCode})');
+    }
+    if (decoded is! List) throw Exception('Respons $path bukan daftar data.');
+    return decoded.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  Future<void> load() async {
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      final loadedPallets = await _getList('pallets');
+      final items = <Map<String, dynamic>>[];
+      final candidates = loadedPallets.where((p) {
+        final status = _str(p, 'status', '').toUpperCase();
+        return status != 'INACTIVE';
+      }).toList();
+      for (final pallet in candidates) {
+        final id = _int(pallet, 'id');
+        if (id <= 0) continue;
+        try {
+          final contents = await _getList('pallet-items?pallet_id=$id');
+          for (final item in contents) {
+            if (_double(item, 'quantity') > 0 && _str(item, 'status', 'AVAILABLE').toUpperCase() == 'AVAILABLE') {
+              items.add(item);
+            }
+          }
+        } catch (_) {
+          // Pallet tanpa isi atau pallet yang tidak dapat dibaca tidak ditampilkan sebagai stok tersedia.
+        }
+      }
+      items.sort((a, b) {
+        final aDate = DateTime.tryParse(_str(a, 'received_at', '')) ?? DateTime(9999);
+        final bDate = DateTime.tryParse(_str(b, 'received_at', '')) ?? DateTime(9999);
+        final dateOrder = aDate.compareTo(bDate);
+        return dateOrder != 0 ? dateOrder : _int(a, 'id').compareTo(_int(b, 'id'));
+      });
+      if (!mounted) return;
+      setState(() {
+        pallets = loadedPallets;
+        stockItems = items;
+        loading = false;
+        if (widget.palletId != null) {
+          final matches = stockItems.where((x) => _int(x, 'pallet_id') == widget.palletId).toList();
+          if (matches.isNotEmpty) _selectItem(matches.first);
+        }
+      });
+    } catch (e) {
+      if (mounted) setState(() { loading = false; error = '$e'; });
+    }
+  }
+
+  void _selectItem(Map<String, dynamic> item) {
+    selectedItem = item;
+    fullOutbound = true;
+    quantityController.text = _double(item, 'quantity').toString();
+    weightController.text = _double(item, 'weight_kg').toString();
+    checks.updateAll((key, value) => false);
+  }
+
+  void _message(String text) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  Future<void> _submitOutbound() async {
+    final item = selectedItem;
+    if (item == null) {
+      _message('Pilih stok SKU/pallet yang akan dikeluarkan.');
+      return;
+    }
+    if (checks.values.any((value) => !value)) {
+      _message('Selesaikan semua checklist outbound sebelum memproses stok.');
+      return;
+    }
+    final skuId = _int(item, 'sku_id');
+    final fifoCandidates = stockItems.where((x) => _int(x, 'sku_id') == skuId && _double(x, 'quantity') > 0).toList()..sort((a, b) {
+      final aDate = DateTime.tryParse(_str(a, 'received_at', '')) ?? DateTime(9999);
+      final bDate = DateTime.tryParse(_str(b, 'received_at', '')) ?? DateTime(9999);
+      final order = aDate.compareTo(bDate);
+      return order != 0 ? order : _int(a, 'id').compareTo(_int(b, 'id'));
+    });
+    if (fifoCandidates.isNotEmpty && _int(fifoCandidates.first, 'id') != _int(item, 'id')) {
+      _message('FIFO: keluarkan stok SKU ini dari pallet ${_palletCode(fifoCandidates.first)} terlebih dahulu.');
+      return;
+    }
+    final availableQty = _double(item, 'quantity');
+    final availableWeight = _double(item, 'weight_kg');
+    final qty = double.tryParse(quantityController.text.trim());
+    final weight = double.tryParse(weightController.text.trim());
+    if (qty == null || qty <= 0 || qty > availableQty) {
+      _message('Jumlah keluar harus lebih dari 0 dan tidak boleh melebihi stok tersedia ($availableQty).');
+      return;
+    }
+    if (weight == null || weight < 0 || weight > availableWeight + 0.0001) {
+      _message('Berat keluar tidak boleh negatif atau melebihi berat tersedia ($availableWeight kg).');
+      return;
+    }
+    if (fullOutbound && (qty - availableQty).abs() > 0.0001) {
+      _message('Mode full outbound harus mengeluarkan seluruh jumlah stok.');
+      return;
+    }
+    if (qty == availableQty && (weight - availableWeight).abs() > 0.0001) {
+      _message('Jika seluruh jumlah dikeluarkan, berat keluar harus sama dengan berat tersisa.');
+      return;
+    }
+    setState(() => saving = true);
+    try {
+      final response = await http.post(
+        Uri.parse('$apiBaseUrl/outbound-transactions'),
+        headers: apiHeaders,
+        body: jsonEncode({
+          'pallet_item_id': _int(item, 'id'),
+          'quantity': qty,
+          'weight_kg': weight,
+          'notes': notesController.text.trim(),
+          'checklist': checks.entries.map((e) => {'label': e.key, 'passed': e.value}).toList(),
+        }),
+      ).timeout(const Duration(seconds: 20));
+      dynamic decoded;
+      try { decoded = jsonDecode(response.body); } catch (_) { decoded = response.body; }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        final message = decoded is Map
+            ? (decoded['error'] ?? decoded['message'] ?? decoded['detail'] ?? response.body)
+            : decoded.toString();
+        throw Exception('$message (HTTP ${response.statusCode})');
+      }
+      await load();
+      if (mounted) {
+        setState(() {
+          selectedItem = null;
+          quantityController.clear();
+          weightController.clear();
+          notesController.clear();
+          checks.updateAll((key, value) => false);
+        });
+      }
+      _message('Pengajuan outbound dikirim. Stok belum berubah sampai disetujui supervisor.');
+    } catch (e) {
+      _message('Outbound gagal: $e');
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
+  }
+
+  Future<void> _reviewOutbound() async {
+    try {
+      final response = await http.get(Uri.parse('$apiBaseUrl/outbound-transactions'), headers: apiHeaders).timeout(const Duration(seconds: 20));
+      dynamic decoded;
+      try {
+        decoded = jsonDecode(response.body);
+      } catch (_) {
+        decoded = response.body;
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        final message = decoded is Map
+            ? (decoded['error'] ?? decoded['message'] ?? response.body)
+            : decoded.toString();
+        throw Exception(message);
+      }
+      if (decoded is! List) {
+        throw Exception('Respons review outbound bukan daftar JSON yang valid: ${decoded.toString()}');
+      }
+      final rows = List<Map<String, dynamic>>.from(decoded);
+      if (!mounted) return;
+      await showDialog<void>(context: context, builder: (dialogContext) => StatefulBuilder(builder: (context, refreshDialog) {
+        final pending = rows.where((x) => '${x['status']}'.toUpperCase() == 'PENDING').toList();
+        Future<void> decide(Map<String,dynamic> row, String action) async {
+          String reason = '';
+          if (action == 'reject') {
+            final controller = TextEditingController();
+            final value = await showDialog<String>(context: context, builder: (c) => AlertDialog(title: const Text('Alasan penolakan'), content: TextField(controller: controller, autofocus: true, maxLines: 3, decoration: const InputDecoration(labelText: 'Alasan wajib diisi')), actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Batal')), FilledButton(onPressed: () => Navigator.pop(c, controller.text.trim()), child: const Text('Lanjutkan'))]));
+            controller.dispose(); if (value == null || value.isEmpty) return; reason = value;
+          }
+          try {
+            final res = await http.post(Uri.parse('$apiBaseUrl/outbound-transactions/${row['id']}/$action'), headers: apiHeaders, body: jsonEncode({'reason': reason})).timeout(const Duration(seconds: 20));
+            dynamic data; try { data = jsonDecode(res.body); } catch (_) { data = res.body; }
+            if (res.statusCode < 200 || res.statusCode >= 300) throw Exception(data is Map ? (data['error'] ?? res.body) : data.toString());
+            rows.removeWhere((x) => x['id'] == row['id']); refreshDialog(() {}); await load();
+            if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text(action == 'approve' ? 'Outbound disetujui dan stok difinalisasi.' : 'Outbound ditolak. Stok tidak berubah.')));
+          } catch (e) { if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text('Gagal memutuskan outbound: $e'))); }
+        }
+        return AlertDialog(
+          title: const Text('Registrasi outbound'),
+          content: SizedBox(
+            width: 560,
+            child: pending.isEmpty
+                ? const Text('Tidak ada pengajuan outbound yang menunggu validasi.')
+                : ListView(
+                    shrinkWrap: true,
+                    children: pending.map((row) {
+                      return Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${row['transaction_no']} · ${row['sku_code']} ${row['sku_name']}',
+                                style: const TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                              Text('Pallet ${row['pallet_id']} · Diminta ${row['quantity']} · ${row['weight_kg']} kg'),
+                              Text('Stok saat review: ${row['available_quantity']} · ${row['available_weight']} kg'),
+                              if ('${row['notes']}'.trim().isNotEmpty)
+                                Text('Catatan: ${row['notes']}'),
+                              const SizedBox(height: 6),
+                              const Text('Barang yang diajukan', style: TextStyle(fontWeight: FontWeight.bold)),
+                              Text('FIFO / waktu penerimaan: ${row['received_at']}'),
+                              if (row['checklist'] is List && (row['checklist'] as List).isNotEmpty) ...[
+                                const SizedBox(height: 6),
+                                const Text('Checklist outbound', style: TextStyle(fontWeight: FontWeight.bold)),
+                                ...(row['checklist'] as List).map((item) {
+                                  final label = item is Map ? '${item['label'] ?? item['name'] ?? 'Checklist'}' : '$item';
+                                  final passed = item is Map && item['passed'] == true;
+                                  return Padding(
+                                    padding: const EdgeInsets.only(top: 3),
+                                    child: Row(
+                                      children: [
+                                        Icon(passed ? Icons.check_circle : Icons.cancel, size: 16, color: passed ? Colors.green : Colors.red),
+                                        const SizedBox(width: 6),
+                                        Expanded(child: Text(label)),
+                                      ],
+                                    ),
+                                  );
+                                }),
+                              ],
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 8,
+                                children: [
+                                  OutlinedButton.icon(
+                                    onPressed: () => decide(row, 'reject'),
+                                    icon: const Icon(Icons.close),
+                                    label: const Text('Reject'),
+                                  ),
+                                  FilledButton.icon(
+                                    onPressed: () => decide(row, 'approve'),
+                                    icon: const Icon(Icons.check),
+                                    label: const Text('Approve & finalisasi'),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
           ),
-        ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Tutup'),
+            ),
+          ],
+        );
+      }));
+    } catch (e) { _message('Gagal memuat review outbound: $e'); }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  @override
+  void dispose() {
+    quantityController.dispose();
+    weightController.dispose();
+    notesController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final query = search.trim().toLowerCase();
+    final visibleItems = stockItems.where((item) {
+      final haystack = '${_str(item, 'sku_code', '')} ${_str(item, 'sku_name', '')} ${_palletCode(item)} ${_location(item)} ${_str(item, 'batch_no', '')}'.toLowerCase();
+      if (widget.palletId != null && _int(item, 'pallet_id') != widget.palletId) return false;
+      return query.isEmpty || haystack.contains(query);
+    }).toList();
+    final selected = selectedItem;
+    final availableQty = selected == null ? 0.0 : _double(selected, 'quantity');
+    final availableWeight = selected == null ? 0.0 : _double(selected, 'weight_kg');
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Gateway Outbound'),
+        actions: [IconButton(tooltip: 'Review outbound', onPressed: saving ? null : _reviewOutbound, icon: const Icon(Icons.fact_check_outlined)), IconButton(tooltip: 'Muat ulang', onPressed: saving ? null : load, icon: const Icon(Icons.refresh))],
       ),
-    ),
-  );
+      drawer: const PasataNavigationDrawer(activeMenu: 'Barang Keluar'),
+      body: loading
+          ? const Center(child: CircularProgressIndicator())
+          : error != null
+              ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Column(mainAxisSize: MainAxisSize.min, children: [Text('Gagal memuat stok: $error'), const SizedBox(height: 12), FilledButton(onPressed: load, child: const Text('Coba lagi'))])))
+              : ListView(padding: const EdgeInsets.all(16), children: [
+                  Card(elevation: 0, child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Text('Cari stok tersedia', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 12),
+                    TextField(decoration: const InputDecoration(prefixIcon: Icon(Icons.search), labelText: 'Cari SKU, pallet, batch, atau lokasi'), onChanged: (v) => setState(() => search = v)),
+                    const SizedBox(height: 12),
+                    Row(children: [
+                      Expanded(child: Text('Stok tersedia: ${visibleItems.length} baris', style: const TextStyle(fontWeight: FontWeight.w500))),
+                      const Chip(label: Text('FIFO: tertua dahulu')),
+                    ]),
+                    if (visibleItems.isEmpty) const Padding(padding: EdgeInsets.symmetric(vertical: 18), child: Text('Tidak ada stok tersedia yang cocok dengan pencarian.')),
+                    ...visibleItems.map((item) {
+                      final isSelected = selected != null && _int(selected, 'id') == _int(item, 'id');
+                      final received = DateTime.tryParse(_str(item, 'received_at', ''));
+                      return Card(
+                        color: isSelected ? Theme.of(context).colorScheme.primaryContainer : null,
+                        child: ListTile(
+                          leading: Icon(isSelected ? Icons.radio_button_checked : Icons.inventory_2_outlined),
+                          title: Text('${_str(item, 'sku_code')} · ${_str(item, 'sku_name')}'),
+                          subtitle: Text('${_palletCode(item)} · ${_location(item)}\nStok ${_double(item, 'quantity')} ${_str(item, 'unit')} · ${_double(item, 'weight_kg')} kg\nBatch ${_str(item, 'batch_no')} · Masuk ${received == null ? _str(item, 'received_at') : received.toLocal().toString().substring(0, 16)}'),
+                          isThreeLine: true,
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () => setState(() => _selectItem(item)),
+                        ),
+                      );
+                    }),
+                  ]))),
+                  const SizedBox(height: 12),
+                  Card(elevation: 0, child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Text('Detail pengeluaran', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 8),
+                    if (selected == null) const Text('Pilih salah satu baris stok di atas untuk memulai outbound.') else ...[
+                      Text('${_str(selected, 'sku_code')} · ${_str(selected, 'sku_name')}', style: const TextStyle(fontWeight: FontWeight.w600)),
+                      Text('Pallet ${_palletCode(selected)} · Lokasi ${_location(selected)}'),
+                      Text('Tersedia ${availableQty.toStringAsFixed(2)} ${_str(selected, 'unit')} · ${availableWeight.toStringAsFixed(2)} kg'),
+                      const SizedBox(height: 12),
+                      SegmentedButton<bool>(
+                        segments: const [ButtonSegment(value: true, label: Text('Full outbound'), icon: Icon(Icons.inventory_2)), ButtonSegment(value: false, label: Text('Partial outbound'), icon: Icon(Icons.exposure_minus_1))],
+                        selected: {fullOutbound},
+                        onSelectionChanged: saving ? null : (v) => setState(() {
+                          fullOutbound = v.first;
+                          if (fullOutbound && selectedItem != null) {
+                            quantityController.text = availableQty.toString();
+                            weightController.text = availableWeight.toString();
+                          } else if (!fullOutbound) {
+                            quantityController.text = '';
+                            weightController.text = '';
+                          }
+                        }),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(controller: quantityController, readOnly: fullOutbound, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: InputDecoration(labelText: 'Jumlah keluar (${_str(selected, 'unit')})', helperText: fullOutbound ? 'Seluruh stok akan dikeluarkan.' : 'Masukkan jumlah yang diminta; sisa stok tetap tersimpan.')),
+                      const SizedBox(height: 10),
+                      TextField(controller: weightController, readOnly: fullOutbound, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: InputDecoration(labelText: 'Berat keluar (kg)', helperText: fullOutbound ? 'Berat mengikuti seluruh stok tersisa.' : 'Masukkan berat aktual yang dikeluarkan.')),
+                      const SizedBox(height: 10),
+                      TextField(controller: notesController, decoration: const InputDecoration(labelText: 'Catatan / referensi outbound (opsional)')),
+                      const Divider(height: 24),
+                      const Text('Checklist outbound', style: TextStyle(fontWeight: FontWeight.w600)),
+                      ...checks.keys.map((label) => CheckboxListTile(contentPadding: EdgeInsets.zero, controlAffinity: ListTileControlAffinity.trailing, title: Text(label), value: checks[label], onChanged: saving ? null : (v) => setState(() => checks[label] = v ?? false))),
+                      const SizedBox(height: 8),
+                      SizedBox(width: double.infinity, child: FilledButton.icon(onPressed: saving ? null : _submitOutbound, icon: saving ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.output), label: Text(saving ? 'Mengirim...' : 'Ajukan outbound untuk validasi'))),
+                      const SizedBox(height: 8),
+                      const Text('Pengajuan berstatus PENDING. Stok baru dikurangi setelah Warehouse Supervisor menyetujui transaksi. FIFO ditampilkan berdasarkan waktu penerimaan terlama.', style: TextStyle(fontSize: 12)),
+                    ],
+                  ]))),
+                ]),
+    );
+  }
 }
 
 class WarehousePage extends StatefulWidget {
@@ -2965,109 +3843,6 @@ class _StockPhysicalSummaryPageState extends State<StockPhysicalSummaryPage> {
           Text('Kemasan: ${_text(x,'packaging_type')} · awal ${_id(x,'initial_packaging_qty')} · tersisa ${_id(x,'packaging_qty')} · outbound ${_outboundPacks(x)}'),
         ])))),
       ])),
-    );
-  }
-}
-
-
-class PalletHistoryPage extends StatefulWidget {
-  const PalletHistoryPage({super.key});
-  @override
-  State<PalletHistoryPage> createState() => _PalletHistoryPageState();
-}
-
-class _PalletHistoryPageState extends State<PalletHistoryPage> {
-  List<Map<String, dynamic>> events = [];
-  List<Map<String, dynamic>> pallets = [];
-  int? selectedPalletId;
-  String search = '';
-  String typeFilter = 'SEMUA';
-  bool loading = true;
-  String? error;
-
-  int _id(dynamic value) => value is num ? value.toInt() : int.tryParse('$value') ?? 0;
-  String _txt(Map<String, dynamic> row, String key, [String fallback = '-']) {
-    final value = row[key];
-    return value == null || '$value'.trim().isEmpty ? fallback : '$value';
-  }
-  Future<List<Map<String, dynamic>>> _list(String path) async {
-    final response = await http.get(Uri.parse('$apiBaseUrl/$path'), headers: apiHeaders).timeout(const Duration(seconds: 15));
-    if (response.statusCode != 200) throw Exception('HTTP ${response.statusCode}: ${response.body}');
-    final decoded = jsonDecode(response.body);
-    if (decoded is! List) throw Exception('Respons $path bukan daftar data');
-    return decoded.whereType<Map>().map((x) => Map<String, dynamic>.from(x)).toList();
-  }
-  Future<void> load() async {
-    setState(() { loading = true; error = null; });
-    try {
-      final p = await _list('pallets');
-      final suffix = selectedPalletId == null ? '' : '?pallet_id=$selectedPalletId';
-      final e = await _list('pallet-history$suffix');
-      if (!mounted) return;
-      setState(() { pallets = p; events = e; loading = false; });
-    } catch (e) {
-      if (mounted) setState(() { error = '$e'; loading = false; });
-    }
-  }
-  List<Map<String, dynamic>> get filtered => events.where((e) {
-    final q = search.trim().toLowerCase();
-    final matchesText = q.isEmpty || ['pallet_code','sku_code','sku_name','action','description','actor_name','from_location','to_location','notes'].any((k) => _txt(e,k,'').toLowerCase().contains(q));
-    final action = _txt(e,'action','').toUpperCase();
-    final matchesType = typeFilter == 'SEMUA' || (typeFilter == 'LOKASI' && action == 'MOVE') || (typeFilter == 'INBOUND/OUTBOUND' && ['INBOUND','OUTBOUND'].contains(action)) || (typeFilter == 'ISI/BERAT' && ['CONTENT_UPDATE','ADJUSTMENT','RECONCILIATION'].contains(action));
-    return matchesText && matchesType;
-  }).toList();
-  IconData _icon(String action) => switch(action.toUpperCase()) {
-    'INBOUND' => Icons.south_west_rounded,
-    'OUTBOUND' => Icons.north_east_rounded,
-    'MOVE' => Icons.swap_horiz_rounded,
-    'CONTENT_UPDATE' => Icons.inventory_2_outlined,
-    'ADJUSTMENT' || 'RECONCILIATION' => Icons.tune_rounded,
-    _ => Icons.history_rounded,
-  };
-  String _label(String action) => switch(action.toUpperCase()) {
-    'INBOUND' => 'Inbound', 'OUTBOUND' => 'Outbound', 'MOVE' => 'Perpindahan lokasi',
-    'CONTENT_UPDATE' => 'Perubahan isi pallet', 'ADJUSTMENT' => 'Penyesuaian stok',
-    'RECONCILIATION' => 'Rekonsiliasi', _ => action
-  };
-  @override void initState() { super.initState(); load(); }
-  @override Widget build(BuildContext context) {
-    final shown = filtered;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Riwayat Pallet'), actions: [IconButton(tooltip:'Muat ulang', onPressed:load, icon:const Icon(Icons.refresh))]),
-      drawer: const PasataNavigationDrawer(activeMenu:'Riwayat Pallet'),
-      body: loading ? const Center(child:CircularProgressIndicator()) : error != null
-        ? Center(child:Padding(padding:const EdgeInsets.all(24), child:Column(mainAxisSize:MainAxisSize.min, children:[Text('Gagal memuat riwayat pallet\n$error', textAlign:TextAlign.center), const SizedBox(height:12), FilledButton(onPressed:load, child:const Text('Coba lagi'))])))
-        : RefreshIndicator(onRefresh:load, child:ListView(padding:const EdgeInsets.all(16), children:[
-          const Text('Timeline aktivitas pallet, perubahan isi dan berat, serta perpindahan lokasi.'),
-          const SizedBox(height:12),
-          DropdownButtonFormField<int?>(value:selectedPalletId, isExpanded:true, decoration:const InputDecoration(labelText:'Filter pallet', border:OutlineInputBorder()), items:[const DropdownMenuItem<int?>(value:null, child:Text('Semua pallet')), ...pallets.map((p)=>DropdownMenuItem<int?>(value:_id(p['id']), child:Text(_txt(p,'pallet_code'))))], onChanged:(v){setState(()=>selectedPalletId=v);load();}),
-          const SizedBox(height:8),
-          TextField(decoration:const InputDecoration(prefixIcon:Icon(Icons.search), labelText:'Cari pallet, SKU, aktivitas, atau user', border:OutlineInputBorder()), onChanged:(v)=>setState(()=>search=v)),
-          const SizedBox(height:8),
-          DropdownButtonFormField<String>(value:typeFilter, decoration:const InputDecoration(labelText:'Jenis aktivitas', border:OutlineInputBorder()), items:const ['SEMUA','LOKASI','INBOUND/OUTBOUND','ISI/BERAT'].map((v)=>DropdownMenuItem(value:v, child:Text(v=='SEMUA'?'Semua aktivitas':v=='LOKASI'?'Riwayat lokasi':v=='INBOUND/OUTBOUND'?'Inbound / Outbound':'Riwayat isi / berat'))).toList(), onChanged:(v)=>setState(()=>typeFilter=v??'SEMUA')),
-          const SizedBox(height:12),
-          Text('${shown.length} aktivitas', style:Theme.of(context).textTheme.titleSmall),
-          if (shown.isEmpty) const Padding(padding:EdgeInsets.all(28), child:Center(child:Text('Belum ada riwayat yang cocok. Aktivitas lama hanya tampil jika sebelumnya tercatat di backend.'))),
-          ...shown.map((e) {
-            final action = _txt(e,'action','AKTIVITAS');
-            final date = _txt(e,'occurred_at', _txt(e,'created_at','Waktu tidak tersedia'));
-            final qtyBefore = _txt(e,'qty_before',''); final qtyChange = _txt(e,'qty_change',''); final qtyAfter = _txt(e,'qty_after','');
-            final weightBefore = _txt(e,'weight_before',''); final weightChange = _txt(e,'weight_change',''); final weightAfter = _txt(e,'weight_after','');
-            return Card(child:Padding(padding:const EdgeInsets.all(14), child:Row(crossAxisAlignment:CrossAxisAlignment.start, children:[
-              CircleAvatar(child:Icon(_icon(action))), const SizedBox(width:12), Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start, children:[
-                Row(crossAxisAlignment:CrossAxisAlignment.start, children:[Expanded(child:Text('${_txt(e,'pallet_code','Pallet')} · ${_label(action)}', style:const TextStyle(fontWeight:FontWeight.bold))), Text(_txt(e,'status',''))]),
-                const SizedBox(height:4), Text(date, style:Theme.of(context).textTheme.bodySmall),
-                if (_txt(e,'sku_code','').isNotEmpty) Text('SKU: ${_txt(e,'sku_code')} · ${_txt(e,'sku_name','')}'),
-                if (action.toUpperCase()=='MOVE') Text('Lokasi: ${_txt(e,'from_location','Belum diketahui')} → ${_txt(e,'to_location','Belum diketahui')}'),
-                if (qtyBefore.isNotEmpty) Text('Quantity: $qtyBefore → $qtyAfter (perubahan $qtyChange)'),
-                if (weightBefore.isNotEmpty) Text('Berat: $weightBefore kg → $weightAfter kg (perubahan $weightChange kg)'),
-                if (_txt(e,'description','').isNotEmpty) Text(_txt(e,'description')),
-                if (_txt(e,'notes','').isNotEmpty) Text('Catatan: ${_txt(e,'notes')}'),
-                const SizedBox(height:4), Text('Dilakukan oleh: ${_txt(e,'actor_name','Tidak tercatat')}', style:const TextStyle(fontWeight:FontWeight.w500)),
-              ]))
-            ])));
-          }),
-        ])),
     );
   }
 }

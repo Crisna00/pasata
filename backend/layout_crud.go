@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 // CRUD handlers for warehouse layout and pallet operations.
 // Existing schema is reused; no DDL or re-import is required.
 func layoutError(w http.ResponseWriter, err error) {
+	log.Printf("[API ERROR] %s %s: %v", "request", "layout operation", err)
 	status := http.StatusInternalServerError
 	msg := "Operasi layout gagal"
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -24,7 +26,8 @@ func layoutError(w http.ResponseWriter, err error) {
 		strings.Contains(strings.ToLower(err.Error()), "check constraint") {
 		status, msg = http.StatusConflict, "Data bentrok dengan data terkait atau melanggar aturan kapasitas"
 	}
-	http.Error(w, msg, status)
+	// Keep API errors JSON so Flutter clients can decode them safely.
+	writeJSON(w, status, map[string]string{"error": msg})
 }
 func parseID(s string) (int64, error) {
 	id, err := strconv.ParseInt(s, 10, 64)
