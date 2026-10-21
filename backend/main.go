@@ -118,6 +118,8 @@ func main() {
 	mux.HandleFunc("/api/auth/logout", app.authLogoutHandler)
 	mux.HandleFunc("/api/auth/me", app.authMeHandler)
 	mux.HandleFunc("/api/auth/roles", app.authRolesHandler)
+	mux.HandleFunc("/api/users", app.usersHandler)
+	mux.HandleFunc("/api/users/", app.usersHandler)
 
 	mux.HandleFunc("/api/warehouses", app.warehousesHandler)
 

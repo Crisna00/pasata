@@ -834,6 +834,7 @@ class PasataNavigationDrawer extends StatelessWidget {
       case 'Transaction History & Audit': page = const TransactionAuditPage(); break;
       case 'Monitoring': page = const MonitoringPage(); break;
       case 'Register User': page = const RegisterPage(); break;
+      case 'Kelola User': page = const UserManagementPage(); break;
       default:
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Menu $menu belum tersedia.')),
@@ -872,8 +873,10 @@ class PasataNavigationDrawer extends StatelessWidget {
         if (currentUser != null && ['SUPER_ADMIN','WAREHOUSE_ADMIN','WAREHOUSE_OPERATOR'].contains('${currentUser!['role_code']}'.toUpperCase())) _item(context, 'Driver & Armada', Icons.local_shipping_outlined),
         if (currentUser != null && ['SUPER_ADMIN','MANAGER','WAREHOUSE_SUPERVISOR'].contains('${currentUser!['role_code']}'.toUpperCase())) _item(context, 'Transaction History & Audit', Icons.history_edu_outlined),
         _item(context, 'Monitoring', Icons.monitor_heart_outlined),
-        if (currentUser != null && currentUser!['role_code'] == 'SUPER_ADMIN')
+        if (currentUser != null && currentUser!['role_code'] == 'SUPER_ADMIN') ...[
           _item(context, 'Register User', Icons.person_add_alt_1_outlined),
+          _item(context, 'Kelola User', Icons.manage_accounts_outlined),
+        ],
         if (currentUser != null)
           ListTile(leading: const Icon(Icons.switch_account_outlined), title: const Text('Switch Account'), onTap: () { Navigator.pop(context); _switchAccount(context); }),
         if (currentUser != null)
@@ -998,6 +1001,112 @@ class _TransactionAuditPageState extends State<TransactionAuditPage> {
       const SizedBox(height:12),const Card(child:Padding(padding:EdgeInsets.all(14),child:Text('Catatan audit: riwayat inbound/outbound ditampilkan dari API transaksi. Log perubahan per-field, pembatalan transaksi, dan stock adjustment membutuhkan pencatatan audit khusus di backend; tindakan tersebut belum diaktifkan pada halaman ini.')))
     ])));
   }
+}
+
+
+class UserManagementPage extends StatefulWidget {
+  const UserManagementPage({super.key});
+  @override
+  State<UserManagementPage> createState() => _UserManagementPageState();
+}
+
+class _UserManagementPageState extends State<UserManagementPage> {
+  final search = TextEditingController();
+  List<Map<String, dynamic>> rows = [];
+  bool loading = false;
+  String? error;
+
+  @override
+  void initState() { super.initState(); load(); }
+  @override
+  void dispose() { search.dispose(); super.dispose(); }
+
+  Future<void> load() async {
+    setState(() => loading = true);
+    try {
+      final uri = Uri.parse('$apiBaseUrl/users').replace(queryParameters: {'q': search.text.trim()});
+      final r = await http.get(uri, headers: apiHeaders).timeout(const Duration(seconds: 20));
+      final data = jsonDecode(r.body);
+      if (r.statusCode < 200 || r.statusCode >= 300) throw Exception(data is Map ? data['error'] ?? r.body : r.body);
+      rows = (data as List).whereType<Map>().map((e) => Map<String,dynamic>.from(e)).toList();
+      error = null;
+    } catch (e) { error = e.toString().replaceFirst('Exception: ', ''); }
+    if (mounted) setState(() => loading = false);
+  }
+
+  Future<void> edit(Map<String,dynamic> row) async {
+    final username = TextEditingController(text: '${row['username'] ?? ''}');
+    final email = TextEditingController(text: '${row['email'] ?? ''}');
+    final fullName = TextEditingController(text: '${row['full_name'] ?? ''}');
+    final password = TextEditingController();
+    final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+      title: Text('Edit user #${row['id']}'),
+      content: SizedBox(width: 460, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        TextField(controller: fullName, decoration: const InputDecoration(labelText: 'Nama lengkap')),
+        TextField(controller: username, decoration: const InputDecoration(labelText: 'Username')),
+        TextField(controller: email, keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(labelText: 'Email')),
+        TextField(controller: password, obscureText: true, decoration: const InputDecoration(labelText: 'Password baru (opsional)', helperText: 'Kosongkan jika tidak ingin mengganti password. Minimal 8 karakter.')),
+        const SizedBox(height: 8), const Text('Password lama tidak ditampilkan. Sistem hanya menyimpan hash password.'),
+      ]))),
+      actions: [TextButton(onPressed: () => Navigator.pop(ctx,false), child: const Text('Batal')), FilledButton(onPressed: () => Navigator.pop(ctx,true), child: const Text('Simpan'))],
+    ));
+    if (ok == true) {
+      try {
+        final body = <String,dynamic>{'id':row['id'],'full_name':fullName.text.trim(),'username':username.text.trim(),'email':email.text.trim()};
+        if (password.text.isNotEmpty) body['password'] = password.text;
+        final r = await http.patch(Uri.parse('$apiBaseUrl/users'), headers: apiHeaders, body: jsonEncode(body)).timeout(const Duration(seconds:20));
+        final data = jsonDecode(r.body);
+        if (r.statusCode < 200 || r.statusCode >= 300) throw Exception(data is Map ? data['error'] ?? r.body : r.body);
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Data user diperbarui.')));
+        await load();
+      } catch(e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Gagal menyimpan: $e'))); }
+    }
+    username.dispose(); email.dispose(); fullName.dispose(); password.dispose();
+  }
+
+  Future<void> deactivateUser(Map<String,dynamic> row) async {
+    final yes = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+      title: const Text('Nonaktifkan user?'),
+      content: Text('Akun ${row['username']} tidak dapat login lagi. Riwayat transaksi tetap disimpan untuk audit.'),
+      actions: [TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('Batal')),FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('Nonaktifkan'))],
+    ));
+    if (yes != true) return;
+    try {
+      final r = await http.delete(Uri.parse('$apiBaseUrl/users/${row['id']}'), headers: apiHeaders).timeout(const Duration(seconds:20));
+      final data = jsonDecode(r.body);
+      if (r.statusCode < 200 || r.statusCode >= 300) throw Exception(data is Map ? data['error'] ?? r.body : r.body);
+      await load();
+    } catch(e) { if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Gagal menonaktifkan user: $e'))); }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Kelola User'), actions: [IconButton(onPressed:load, tooltip:'Refresh', icon:const Icon(Icons.refresh))]),
+    drawer: const PasataNavigationDrawer(activeMenu:'Kelola User'),
+    body: RefreshIndicator(onRefresh:load, child: ListView(padding:const EdgeInsets.all(16), children: [
+      Card(child:Padding(padding:const EdgeInsets.all(16),child:Column(children:[
+        const Align(alignment:Alignment.centerLeft,child:Text('Manajemen pengguna',style:TextStyle(fontSize:20,fontWeight:FontWeight.bold))),
+        const SizedBox(height:8),
+        const Align(alignment:Alignment.centerLeft,child:Text('Cari berdasarkan ID, nama, username, atau email. Password tidak bisa dilihat; admin dapat menggantinya.')),
+        const SizedBox(height:12),
+        TextField(controller:search, decoration:InputDecoration(labelText:'Cari user',prefixIcon:const Icon(Icons.search),suffixIcon:IconButton(onPressed:()=>search.clear(),icon:const Icon(Icons.clear))), onSubmitted:(_)=>load()),
+        const SizedBox(height:8), SizedBox(width:double.infinity,child:FilledButton.icon(onPressed:load,icon:const Icon(Icons.search),label:const Text('Cari user'))),
+      ]))),
+      if (loading) const Padding(padding:EdgeInsets.all(24),child:Center(child:CircularProgressIndicator())),
+      if (error != null) Card(child:Padding(padding:const EdgeInsets.all(16),child:Text('Gagal memuat user: $error',style:const TextStyle(color:Colors.red)))),
+      if (!loading && error == null && rows.isEmpty) const Padding(padding:EdgeInsets.all(24),child:Center(child:Text('User tidak ditemukan.'))),
+      ...rows.map((u)=>Card(child:ListTile(
+        leading:CircleAvatar(child:Text('${u['id']}')),
+        title:Text('${u['full_name'] ?? '-'} · ${u['username'] ?? '-'}'),
+        subtitle:Text('Email: ${u['email'] ?? '-'}\nRole: ${u['role_name'] ?? u['role_code'] ?? '-'} · ${u['is_active']==true?'Aktif':'Nonaktif'}'),
+        isThreeLine:true,
+        trailing:PopupMenuButton<String>(onSelected:(v){if(v=='edit')edit(u);if(v=='deactivate')deactivateUser(u);},itemBuilder:(_)=>[
+          const PopupMenuItem(value:'edit',child:Text('Edit user / reset password')),
+          if(u['is_active']==true && '${u['id']}' != '${currentUser?['id']}') const PopupMenuItem(value:'deactivate',child:Text('Nonaktifkan user')),
+        ]),
+      ))),
+    ])),
+  );
 }
 
 class DashboardPage extends StatelessWidget {
