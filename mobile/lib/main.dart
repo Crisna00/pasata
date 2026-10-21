@@ -1124,30 +1124,78 @@ class DashboardPage extends StatelessWidget {
 
             const SizedBox(height: 14),
 
-            const _SummaryCard(
-              title: 'Barang Masuk',
-
-              value: '—',
-
-              subtitle: 'Belum terhubung ke API',
-
-              icon: Icons.south_west_rounded,
-
-              color: Color(0xFFD97706),
-            ),
-
-            const SizedBox(height: 14),
-
-            const _SummaryCard(
-              title: 'Barang Keluar',
-
-              value: '—',
-
-              subtitle: 'Belum terhubung ke API',
-
-              icon: Icons.north_east_rounded,
-
-              color: Color(0xFF7C3AED),
+            FutureBuilder<List<int>>(
+              future: _loadDashboardTransactionCounts(),
+              builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return Column(
+                    children: [
+                      _SummaryCard(
+                        title: 'Barang Masuk',
+                        value: '—',
+                        subtitle: 'Gagal memuat transaksi Inbound',
+                        icon: Icons.south_west_rounded,
+                        color: const Color(0xFFD97706),
+                      ),
+                      const SizedBox(height: 14),
+                      _SummaryCard(
+                        title: 'Barang Keluar',
+                        value: '—',
+                        subtitle: 'Gagal memuat transaksi Outbound',
+                        icon: Icons.north_east_rounded,
+                        color: const Color(0xFF7C3AED),
+                      ),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Periksa koneksi backend lalu muat ulang halaman. ${snapshot.error}',
+                          style: TextStyle(color: Colors.red.shade700, fontSize: 12),
+                        ),
+                      ),
+                    ],
+                  );
+                }
+                if (!snapshot.hasData) {
+                  return const Column(
+                    children: [
+                      _SummaryCard(
+                        title: 'Barang Masuk', value: '...',
+                        subtitle: 'Memuat transaksi Inbound',
+                        icon: Icons.south_west_rounded,
+                        color: Color(0xFFD97706),
+                      ),
+                      SizedBox(height: 14),
+                      _SummaryCard(
+                        title: 'Barang Keluar', value: '...',
+                        subtitle: 'Memuat transaksi Outbound',
+                        icon: Icons.north_east_rounded,
+                        color: Color(0xFF7C3AED),
+                      ),
+                    ],
+                  );
+                }
+                final counts = snapshot.data!;
+                return Column(
+                  children: [
+                    _SummaryCard(
+                      title: 'Barang Masuk',
+                      value: '${counts[0]}',
+                      subtitle: 'Total transaksi Inbound',
+                      icon: Icons.south_west_rounded,
+                      color: const Color(0xFFD97706),
+                    ),
+                    const SizedBox(height: 14),
+                    _SummaryCard(
+                      title: 'Barang Keluar',
+                      value: '${counts[1]}',
+                      subtitle: 'Total transaksi Outbound',
+                      icon: Icons.north_east_rounded,
+                      color: const Color(0xFF7C3AED),
+                    ),
+                  ],
+                );
+              },
             ),
 
             const SizedBox(height: 24),
@@ -1159,41 +1207,159 @@ class DashboardPage extends StatelessWidget {
 
             const SizedBox(height: 10),
 
-            Card(
-              elevation: 0,
-
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-
-                child: Column(
-                  children: [
-                    Icon(
-                      Icons.receipt_long_outlined,
-                      size: 40,
-                      color: Colors.grey.shade500,
+            FutureBuilder<List<Map<String, dynamic>>>(
+              future: _loadDashboardRecentActivities(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Card(
+                    child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Center(child: CircularProgressIndicator()),
                     ),
-
-                    const SizedBox(height: 10),
-
-                    const Text('Belum ada aktivitas'),
-
-                    const SizedBox(height: 4),
-
-                    Text(
-                      'Riwayat aktivitas belum dihubungkan ke API.',
-
-                      textAlign: TextAlign.center,
-
-                      style: TextStyle(color: Colors.grey.shade600),
+                  );
+                }
+                if (snapshot.hasError) {
+                  return Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Text(
+                        'Gagal memuat aktivitas terbaru: ${snapshot.error}',
+                        style: TextStyle(color: Colors.red.shade700),
+                      ),
                     ),
-                  ],
-                ),
-              ),
+                  );
+                }
+                final activities = snapshot.data ?? <Map<String, dynamic>>[];
+                if (activities.isEmpty) {
+                  return const Card(
+                    child: Padding(
+                      padding: EdgeInsets.all(20),
+                      child: Center(child: Text('Belum ada aktivitas transaksi.')),
+                    ),
+                  );
+                }
+                String field(Map<String, dynamic> row, List<String> keys, [String fallback = '-']) {
+                  for (final key in keys) {
+                    final value = row[key];
+                    if (value != null && '$value'.trim().isNotEmpty) return '$value';
+                  }
+                  return fallback;
+                }
+                String displayTime(Map<String, dynamic> row) {
+                  final raw = field(row, ['created_at', 'createdAt', 'arrived_at', 'requested_at'], '');
+                  final parsed = DateTime.tryParse(raw);
+                  if (parsed == null) return raw.isEmpty ? 'Waktu tidak tersedia' : raw;
+                  final local = parsed.toLocal();
+                  String two(int n) => n.toString().padLeft(2, '0');
+                  return '${two(local.day)}/${two(local.month)}/${local.year} ${two(local.hour)}:${two(local.minute)}';
+                }
+                return Card(
+                  elevation: 0,
+                  child: Column(
+                    children: activities.map((row) {
+                      final kind = field(row, ['_kind'], 'Transaksi');
+                      final status = field(row, ['status'], 'UNKNOWN');
+                      final number = field(row, ['transaction_no', 'transaction_number', 'id'], 'Transaksi');
+                      final inbound = kind == 'Inbound';
+                      return ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: inbound ? const Color(0xFFFFF0DF) : const Color(0xFFF0E7FF),
+                          child: Icon(
+                            inbound ? Icons.south_west_rounded : Icons.north_east_rounded,
+                            color: inbound ? const Color(0xFFD97706) : const Color(0xFF7C3AED),
+                          ),
+                        ),
+                        title: Text(number, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        subtitle: Text('$kind · Status: $status\n${displayTime(row)}'),
+                        isThreeLine: false,
+                        trailing: const Icon(Icons.chevron_right),
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const TransactionAuditPage()),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                );
+              },
             ),
           ],
         ),
       ),
     );
+  }
+
+  Future<List<int>> _loadDashboardTransactionCounts() async {
+    Future<int> countTransactions(String path) async {
+      final response = await http
+          .get(Uri.parse('$apiBaseUrl/$path'), headers: apiHeaders)
+          .timeout(const Duration(seconds: 20));
+      dynamic decoded;
+      try {
+        decoded = jsonDecode(response.body);
+      } catch (_) {
+        throw Exception('Respons $path bukan JSON yang valid.');
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        final message = decoded is Map
+            ? (decoded['error'] ?? decoded['message'] ?? response.body)
+            : decoded.toString();
+        throw Exception('$message (HTTP ${response.statusCode})');
+      }
+      if (decoded is! List) {
+        throw Exception('Respons $path bukan daftar transaksi.');
+      }
+      return decoded.length;
+    }
+
+    final results = await Future.wait([
+      countTransactions('inbound-transactions'),
+      countTransactions('outbound-transactions'),
+    ]);
+    return results;
+  }
+
+  Future<List<Map<String, dynamic>>> _loadDashboardRecentActivities() async {
+    Future<List<Map<String, dynamic>>> fetch(String path, String kind) async {
+      final response = await http
+          .get(Uri.parse('$apiBaseUrl/$path'), headers: apiHeaders)
+          .timeout(const Duration(seconds: 20));
+      dynamic decoded;
+      try {
+        decoded = jsonDecode(response.body);
+      } catch (_) {
+        throw Exception('Respons $path bukan JSON yang valid.');
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        final message = decoded is Map
+            ? (decoded['error'] ?? decoded['message'] ?? response.body)
+            : decoded.toString();
+        throw Exception('$message (HTTP ${response.statusCode})');
+      }
+      if (decoded is! List) throw Exception('Respons $path bukan daftar transaksi.');
+      return decoded
+          .whereType<Map>()
+          .map((row) => <String, dynamic>{...Map<String, dynamic>.from(row), '_kind': kind})
+          .toList();
+    }
+
+    final result = await Future.wait([
+      fetch('inbound-transactions', 'Inbound'),
+      fetch('outbound-transactions', 'Outbound'),
+    ]);
+    final all = <Map<String, dynamic>>[...result[0], ...result[1]];
+    DateTime sortTime(Map<String, dynamic> row) {
+      for (final key in ['created_at', 'createdAt', 'arrived_at', 'requested_at']) {
+        final value = row[key];
+        if (value != null) {
+          final parsed = DateTime.tryParse('$value');
+          if (parsed != null) return parsed;
+        }
+      }
+      return DateTime.fromMillisecondsSinceEpoch(0);
+    }
+    all.sort((a, b) => sortTime(b).compareTo(sortTime(a)));
+    return all.take(5).toList();
   }
 
   Widget _unavailableMenu(BuildContext context, IconData icon, String title) {
