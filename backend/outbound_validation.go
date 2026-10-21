@@ -15,6 +15,9 @@ import (
 
 // Outbound validation: requests remain PENDING until a warehouse supervisor decides.
 func (a *App) ensureOutboundValidationSchema(ctx context.Context) error {
+	if err := a.ensureDriverFleetSchema(ctx); err != nil {
+		return err
+	}
 	_, err := a.DB.Exec(ctx, `CREATE TABLE IF NOT EXISTS outbound_validation_requests (
   id BIGSERIAL PRIMARY KEY,
   transaction_no TEXT NOT NULL UNIQUE,
@@ -31,6 +34,9 @@ func (a *App) ensureOutboundValidationSchema(ctx context.Context) error {
   decided_at TIMESTAMPTZ
  )`)
 	if err != nil {
+		return err
+	}
+	if _, err = a.DB.Exec(ctx, `ALTER TABLE outbound_validation_requests ADD COLUMN IF NOT EXISTS driver_id BIGINT REFERENCES warehouse_drivers(id), ADD COLUMN IF NOT EXISTS departure_time TIMESTAMPTZ`); err != nil {
 		return err
 	}
 	// Upgrade databases created by earlier PASATA versions.
@@ -59,7 +65,7 @@ func (a *App) outboundTransactionsHandler(w http.ResponseWriter, r *http.Request
 	}
 	switch r.Method {
 	case http.MethodGet:
-		rows, err := a.DB.Query(ctx, `SELECT t.id,t.transaction_no,t.pallet_item_id,t.quantity,t.weight_kg,t.notes,t.checklist,t.status,t.requested_by,t.decided_by,t.decision_note,t.created_at,t.decided_at,pi.sku_id,COALESCE(s.sku_code,''),COALESCE(s.name,''),pi.pallet_id,pi.quantity AS available_quantity,pi.weight_kg AS available_weight,COALESCE(pi.batch_no,''),COALESCE(pi.received_at,NOW()) FROM outbound_validation_requests t JOIN pallet_items pi ON pi.id=t.pallet_item_id LEFT JOIN skus s ON s.id=pi.sku_id ORDER BY t.created_at DESC`)
+		rows, err := a.DB.Query(ctx, `SELECT t.id,t.transaction_no,t.pallet_item_id,t.quantity,t.weight_kg,t.notes,t.checklist,t.status,t.requested_by,t.decided_by,t.decision_note,t.created_at,t.decided_at,pi.sku_id,COALESCE(s.sku_code,''),COALESCE(s.name,''),pi.pallet_id,pi.quantity AS available_quantity,pi.weight_kg AS available_weight,COALESCE(pi.batch_no,''),COALESCE(pi.received_at,NOW()),t.driver_id,t.departure_time,COALESCE(d.driver_name,''),COALESCE(d.plate_number,''),COALESCE(d.vehicle_type,'') FROM outbound_validation_requests t LEFT JOIN warehouse_drivers d ON d.id=t.driver_id JOIN pallet_items pi ON pi.id=t.pallet_item_id LEFT JOIN skus s ON s.id=pi.sku_id ORDER BY t.created_at DESC`)
 		if err != nil {
 			log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
 			layoutError(w, err)
@@ -76,14 +82,17 @@ func (a *App) outboundTransactionsHandler(w http.ResponseWriter, r *http.Request
 			var created time.Time
 			var decided *time.Time
 			var received time.Time
-			if err := rows.Scan(&id, &no, &itemID, &qty, &weight, &notes, &checklist, &status, &reqBy, &decBy, &decision, &created, &decided, &skuID, &code, &name, &palletID, &availQty, &availWeight, &batch, &received); err != nil {
+			var driverID *int64
+			var departure *time.Time
+			var driverName, plate, vehicleType string
+			if err := rows.Scan(&id, &no, &itemID, &qty, &weight, &notes, &checklist, &status, &reqBy, &decBy, &decision, &created, &decided, &skuID, &code, &name, &palletID, &availQty, &availWeight, &batch, &received, &driverID, &departure, &driverName, &plate, &vehicleType); err != nil {
 				log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
 				layoutError(w, err)
 				return
 			}
 			var ck any
 			_ = json.Unmarshal(checklist, &ck)
-			out = append(out, map[string]any{"id": id, "transaction_no": no, "pallet_item_id": itemID, "quantity": qty, "weight_kg": weight, "notes": notes, "checklist": ck, "status": status, "requested_by": reqBy, "decided_by": decBy, "decision_note": decision, "created_at": created, "decided_at": decided, "sku_id": skuID, "sku_code": code, "sku_name": name, "pallet_id": palletID, "available_quantity": availQty, "available_weight": availWeight, "batch_no": batch, "received_at": received})
+			out = append(out, map[string]any{"id": id, "transaction_no": no, "pallet_item_id": itemID, "quantity": qty, "weight_kg": weight, "notes": notes, "checklist": ck, "status": status, "requested_by": reqBy, "decided_by": decBy, "decision_note": decision, "created_at": created, "decided_at": decided, "sku_id": skuID, "sku_code": code, "sku_name": name, "pallet_id": palletID, "available_quantity": availQty, "available_weight": availWeight, "batch_no": batch, "received_at": received, "driver_id": driverID, "departure_time": departure, "driver_name": driverName, "plate_number": plate, "vehicle_type": vehicleType})
 		}
 		writeJSON(w, 200, out)
 	case http.MethodPost:
@@ -171,9 +180,27 @@ func (a *App) outboundTransactionsHandler(w http.ResponseWriter, r *http.Request
 			return
 		}
 		raw, _ := json.Marshal(checklist)
+		var driverID any
+		if v := strings.TrimSpace(fmt.Sprint(b["driver_id"])); v != "" && v != "<nil>" {
+			parsed, e := parseID(v)
+			if e != nil {
+				authError(w, 400, "driver_id tidak valid")
+				return
+			}
+			driverID = parsed
+		}
+		var departure any
+		if v := strings.TrimSpace(strField(b, "departure_time")); v != "" {
+			parsed, e := time.Parse(time.RFC3339, v)
+			if e != nil {
+				authError(w, 400, "departure_time harus format ISO/RFC3339")
+				return
+			}
+			departure = parsed
+		}
 		no := fmt.Sprintf("OUT-%s-%d", time.Now().Format("20060102-150405"), itemID)
 		var id int64
-		err = tx.QueryRow(ctx, `INSERT INTO outbound_validation_requests(transaction_no,pallet_item_id,quantity,weight_kg,notes,checklist,status,requested_by) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8) RETURNING id`, no, itemID, qty, weight, strField(b, "notes"), string(raw), status, session.UserID).Scan(&id)
+		err = tx.QueryRow(ctx, `INSERT INTO outbound_validation_requests(transaction_no,pallet_item_id,quantity,weight_kg,notes,checklist,status,requested_by,driver_id,departure_time) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10) RETURNING id`, no, itemID, qty, weight, strField(b, "notes"), string(raw), status, session.UserID, driverID, departure).Scan(&id)
 		if err != nil {
 			log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
 			layoutError(w, err)

@@ -145,6 +145,7 @@ func main() {
 	mux.HandleFunc("/api/pallet-item-outbound", app.palletItemOutboundHandler)
 	mux.HandleFunc("/api/outbound-transactions", app.outboundTransactionsHandler)
 	mux.HandleFunc("/api/outbound-transactions/", app.outboundTransactionActionHandler)
+	mux.HandleFunc("/api/drivers", app.driversHandler)
 	mux.HandleFunc("/api/pallet-move", app.movePallet)
 	mux.HandleFunc("/api/monitoring/summary", app.monitoringSummaryHandler)
 	mux.HandleFunc("/api/monitoring/fifo", app.monitoringFIFOHandler)

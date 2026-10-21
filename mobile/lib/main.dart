@@ -830,6 +830,7 @@ class PasataNavigationDrawer extends StatelessWidget {
       case 'Scanner & Validasi SKU': page = const ScannerValidasiSkuPage(); break;
       case 'Barang Masuk': page = const InboundPage(); break;
       case 'Barang Keluar': page = const OutboundPage(); break;
+      case 'Driver & Armada': page = const DriverFleetPage(); break;
       case 'Monitoring': page = const MonitoringPage(); break;
       case 'Register User': page = const RegisterPage(); break;
       default:
@@ -867,6 +868,7 @@ class PasataNavigationDrawer extends StatelessWidget {
         _item(context, 'Scanner & Validasi SKU', Icons.document_scanner_outlined),
         _item(context, 'Barang Masuk', Icons.south_west_rounded),
         _item(context, 'Barang Keluar', Icons.north_east_rounded),
+        if (currentUser != null && ['SUPER_ADMIN','WAREHOUSE_ADMIN','WAREHOUSE_OPERATOR'].contains('${currentUser!['role_code']}'.toUpperCase())) _item(context, 'Driver & Armada', Icons.local_shipping_outlined),
         _item(context, 'Monitoring', Icons.monitor_heart_outlined),
         if (currentUser != null && currentUser!['role_code'] == 'SUPER_ADMIN')
           _item(context, 'Register User', Icons.person_add_alt_1_outlined),
@@ -882,6 +884,22 @@ class PasataNavigationDrawer extends StatelessWidget {
     leading: Icon(icon), title: Text(label), selected: activeMenu == label,
     onTap: () => _open(context, label),
   );
+}
+
+class DriverFleetPage extends StatefulWidget {
+  const DriverFleetPage({super.key});
+  @override State<DriverFleetPage> createState() => _DriverFleetPageState();
+}
+class _DriverFleetPageState extends State<DriverFleetPage> {
+  bool loading=true, saving=false; String? error; List<Map<String,dynamic>> rows=[];
+  final name=TextEditingController(), plate=TextEditingController(), kind=TextEditingController(), phone=TextEditingController();
+  String _s(Map<String,dynamic> r,String k)=>'${r[k]??''}';
+  Future<void> load() async { setState(()=>loading=true); try { final res=await http.get(Uri.parse('$apiBaseUrl/drivers'),headers:apiHeaders).timeout(const Duration(seconds:20)); final body=jsonDecode(res.body); if(res.statusCode<200||res.statusCode>=300) throw Exception(body is Map?(body['error']??body['message']??res.body):res.body); rows=(body as List).whereType<Map>().map((e)=>Map<String,dynamic>.from(e)).toList(); error=null; } catch(e){error='$e';} if(mounted)setState(()=>loading=false); }
+  Future<void> save() async { if(name.text.trim().isEmpty||plate.text.trim().isEmpty||kind.text.trim().isEmpty){ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Nama driver, nomor polisi, dan jenis kendaraan wajib diisi.')));return;} setState(()=>saving=true); try { final res=await http.post(Uri.parse('$apiBaseUrl/drivers'),headers:apiHeaders,body:jsonEncode({'driver_name':name.text.trim(),'plate_number':plate.text.trim().toUpperCase(),'vehicle_type':kind.text.trim(),'phone':phone.text.trim()})).timeout(const Duration(seconds:20)); final b=jsonDecode(res.body); if(res.statusCode<200||res.statusCode>=300) throw Exception(b is Map?(b['error']??b['message']??res.body):res.body); name.clear();plate.clear();kind.clear();phone.clear(); await load(); if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Data driver & armada tersimpan.'))); } catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Gagal menyimpan: $e')));} finally {if(mounted)setState(()=>saving=false);} }
+  Future<void> toggle(Map<String,dynamic> row) async { final active=row['active']!=true; try { final res=await http.patch(Uri.parse('$apiBaseUrl/drivers'),headers:apiHeaders,body:jsonEncode({'id':row['id'],'active':active})); if(res.statusCode<200||res.statusCode>=300) throw Exception(res.body); await load(); }catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('$e')));} }
+  @override void initState(){super.initState();load();}
+  @override void dispose(){name.dispose();plate.dispose();kind.dispose();phone.dispose();super.dispose();}
+  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Driver & Armada'),actions:[IconButton(onPressed:load,icon:const Icon(Icons.refresh))]),drawer:const PasataNavigationDrawer(activeMenu:'Driver & Armada'),body:loading?const Center(child:CircularProgressIndicator()):ListView(padding:const EdgeInsets.all(16),children:[Card(child:Padding(padding:const EdgeInsets.all(16),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Tambah driver dan kendaraan',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold)),const SizedBox(height:12),TextField(controller:name,decoration:const InputDecoration(labelText:'Nama driver')),TextField(controller:plate,decoration:const InputDecoration(labelText:'Nomor polisi (Nopol)')),TextField(controller:kind,decoration:const InputDecoration(labelText:'Jenis kendaraan',hintText:'Pickup, Truk, Wingbox, dll.')),TextField(controller:phone,keyboardType:TextInputType.phone,decoration:const InputDecoration(labelText:'Nomor telepon (opsional)')),const SizedBox(height:12),SizedBox(width:double.infinity,child:FilledButton.icon(onPressed:saving?null:save,icon:const Icon(Icons.save),label:Text(saving?'Menyimpan...':'Simpan data armada')))]))),const SizedBox(height:12),const Text('Data driver & armada',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold)),if(error!=null)Text('Gagal memuat: $error'),if(rows.isEmpty&&error==null)const Padding(padding:EdgeInsets.all(16),child:Text('Belum ada data driver.')), ...rows.map((r)=>Card(child:ListTile(leading:Icon(Icons.local_shipping_outlined,color:r['active']==true?Colors.green:Colors.grey),title:Text('${_s(r,'driver_name')} · ${_s(r,'plate_number')}'),subtitle:Text('${_s(r,'vehicle_type')}${_s(r,'phone').isNotEmpty?' · ${_s(r,'phone')}':''}\nStatus: ${r['active']==true?'Aktif':'Nonaktif'}'),isThreeLine:true,trailing:currentUser!=null&&['SUPER_ADMIN','WAREHOUSE_ADMIN'].contains('${currentUser!['role_code']}'.toUpperCase())?IconButton(tooltip:r['active']==true?'Nonaktifkan':'Aktifkan',onPressed:()=>toggle(r),icon:Icon(r['active']==true?Icons.toggle_on:Icons.toggle_off)):null)))]));
 }
 
 class DashboardPage extends StatelessWidget {
@@ -1644,6 +1662,9 @@ class _OutboundPageState extends State<OutboundPage> {
   List<Map<String, dynamic>> pallets = [];
   List<Map<String, dynamic>> stockItems = [];
   List<Map<String, dynamic>> outboundHistory = [];
+  List<Map<String, dynamic>> drivers = [];
+  int? selectedDriverId;
+  DateTime? departureTime;
   bool historyLoading = false;
   String? historyError;
   Map<String, dynamic>? selectedItem;
@@ -1763,6 +1784,7 @@ class _OutboundPageState extends State<OutboundPage> {
     });
     try {
       final loadedPallets = await _getList('pallets');
+      try { drivers = (await _getList('drivers')).where((d) => d['active'] == true).toList(); } catch (_) { drivers = []; }
       final items = <Map<String, dynamic>>[];
       final candidates = loadedPallets.where((p) {
         final status = _str(p, 'status', '').toUpperCase();
@@ -1866,6 +1888,8 @@ class _OutboundPageState extends State<OutboundPage> {
           'quantity': qty,
           'weight_kg': weight,
           'notes': notesController.text.trim(),
+          'driver_id': selectedDriverId,
+          'departure_time': departureTime?.toUtc().toIso8601String(),
           'status': asDraft ? 'DRAFT' : 'PENDING',
           'checklist': checks.entries.map((e) => {'label': e.key, 'passed': e.value}).toList(),
         }),
@@ -1886,6 +1910,7 @@ class _OutboundPageState extends State<OutboundPage> {
           quantityController.clear();
           weightController.clear();
           notesController.clear();
+          selectedDriverId = null; departureTime = null;
           checks.updateAll((key, value) => false);
         });
       }
@@ -2108,6 +2133,10 @@ class _OutboundPageState extends State<OutboundPage> {
                       TextField(controller: weightController, readOnly: fullOutbound, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: InputDecoration(labelText: 'Berat keluar (kg)', helperText: fullOutbound ? 'Berat mengikuti seluruh stok tersisa.' : 'Masukkan berat aktual yang dikeluarkan.')),
                       const SizedBox(height: 10),
                       TextField(controller: notesController, decoration: const InputDecoration(labelText: 'Catatan / referensi outbound (opsional)')),
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField<int?>(value: selectedDriverId, decoration: const InputDecoration(labelText: 'Driver & armada (opsional)', helperText: 'Pilih kendaraan yang terkait dengan transaksi outbound'), items: [const DropdownMenuItem<int?>(value: null, child: Text('Belum ditentukan')), ...drivers.map((d) => DropdownMenuItem<int?>(value: _int(d,'id'), child: Text('${_str(d,'driver_name')} · ${_str(d,'plate_number')} · ${_str(d,'vehicle_type')}')))], onChanged: saving ? null : (v) => setState(() => selectedDriverId = v)),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(onPressed: saving ? null : () async { final now = DateTime.now(); final date = await showDatePicker(context: context, initialDate: departureTime ?? now, firstDate: now.subtract(const Duration(days: 1)), lastDate: now.add(const Duration(days: 365))); if (date == null || !mounted) return; final time = await showTimePicker(context: context, initialTime: TimeOfDay.fromDateTime(departureTime ?? now)); if (time == null || !mounted) return; setState(() => departureTime = DateTime(date.year,date.month,date.day,time.hour,time.minute)); }, icon: const Icon(Icons.schedule), label: Text(departureTime == null ? 'Atur waktu keberangkatan' : 'Berangkat: ${departureTime!.toLocal().toString().substring(0,16)}')),
                       const Divider(height: 24),
                       const Text('Checklist outbound', style: TextStyle(fontWeight: FontWeight.w600)),
                       ...checks.keys.map((label) => CheckboxListTile(contentPadding: EdgeInsets.zero, controlAffinity: ListTileControlAffinity.trailing, title: Text(label), value: checks[label], onChanged: saving ? null : (v) => setState(() => checks[label] = v ?? false))),
