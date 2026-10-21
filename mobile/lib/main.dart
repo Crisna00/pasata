@@ -1815,14 +1815,14 @@ class _OutboundPageState extends State<OutboundPage> {
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
-  Future<void> _submitOutbound() async {
+  Future<void> _submitOutbound({bool asDraft = false}) async {
     final item = selectedItem;
     if (item == null) {
       _message('Pilih stok SKU/pallet yang akan dikeluarkan.');
       return;
     }
-    if (checks.values.any((value) => !value)) {
-      _message('Selesaikan semua checklist outbound sebelum memproses stok.');
+    if (!asDraft && checks.values.any((value) => !value)) {
+      _message('Selesaikan semua checklist outbound sebelum mengirim untuk verifikasi.');
       return;
     }
     final skuId = _int(item, 'sku_id');
@@ -1866,6 +1866,7 @@ class _OutboundPageState extends State<OutboundPage> {
           'quantity': qty,
           'weight_kg': weight,
           'notes': notesController.text.trim(),
+          'status': asDraft ? 'DRAFT' : 'PENDING',
           'checklist': checks.entries.map((e) => {'label': e.key, 'passed': e.value}).toList(),
         }),
       ).timeout(const Duration(seconds: 20));
@@ -1888,7 +1889,7 @@ class _OutboundPageState extends State<OutboundPage> {
           checks.updateAll((key, value) => false);
         });
       }
-      _message('Pengajuan outbound dikirim. Stok belum berubah sampai disetujui supervisor.');
+      _message(asDraft ? 'Draft outbound tersimpan. Stok belum berubah.' : 'Transaksi dikirim untuk verifikasi. Stok belum berubah sampai disetujui supervisor.');
     } catch (e) {
       _message('Outbound gagal: $e');
     } finally {
@@ -1917,9 +1918,19 @@ class _OutboundPageState extends State<OutboundPage> {
       final rows = List<Map<String, dynamic>>.from(decoded);
       if (!mounted) return;
       await showDialog<void>(context: context, builder: (dialogContext) => StatefulBuilder(builder: (context, refreshDialog) {
-        final pending = rows.where((x) => '${x['status']}'.toUpperCase() == 'PENDING').toList();
+        final pending = rows.where((x) => ['DRAFT','PENDING','APPROVED','REJECTED','COMPLETED'].contains('${x['status']}'.toUpperCase())).toList();
         Future<void> decide(Map<String,dynamic> row, String action) async {
           String reason = '';
+          if (action == 'submit' || action == 'complete') {
+            try {
+              final res = await http.post(Uri.parse('$apiBaseUrl/outbound-transactions/${row['id']}/$action'), headers: apiHeaders, body: jsonEncode({})).timeout(const Duration(seconds: 20));
+              dynamic data; try { data = jsonDecode(res.body); } catch (_) { data = res.body; }
+              if (res.statusCode < 200 || res.statusCode >= 300) throw Exception(data is Map ? (data['error'] ?? res.body) : data.toString());
+              row['status'] = action == 'submit' ? 'PENDING' : 'COMPLETED'; refreshDialog(() {}); await load();
+              if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text(action == 'submit' ? 'Draft dikirim untuk verifikasi.' : 'Transaksi ditandai Completed.')));
+            } catch (e) { if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text('Aksi transaksi gagal: $e'))); }
+            return;
+          }
           if (action == 'reject') {
             final controller = TextEditingController();
             final value = await showDialog<String>(context: context, builder: (c) => AlertDialog(title: const Text('Alasan penolakan'), content: TextField(controller: controller, autofocus: true, maxLines: 3, decoration: const InputDecoration(labelText: 'Alasan wajib diisi')), actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Batal')), FilledButton(onPressed: () => Navigator.pop(c, controller.text.trim()), child: const Text('Lanjutkan'))]));
@@ -1929,7 +1940,7 @@ class _OutboundPageState extends State<OutboundPage> {
             final res = await http.post(Uri.parse('$apiBaseUrl/outbound-transactions/${row['id']}/$action'), headers: apiHeaders, body: jsonEncode({'reason': reason})).timeout(const Duration(seconds: 20));
             dynamic data; try { data = jsonDecode(res.body); } catch (_) { data = res.body; }
             if (res.statusCode < 200 || res.statusCode >= 300) throw Exception(data is Map ? (data['error'] ?? res.body) : data.toString());
-            rows.removeWhere((x) => x['id'] == row['id']); refreshDialog(() {}); await load(); await loadHistory();
+            row['status'] = action == 'approve' ? 'APPROVED' : 'REJECTED'; if (action == 'reject') row['decision_note'] = reason; refreshDialog(() {}); await load(); await loadHistory();
             if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text(action == 'approve' ? 'Outbound disetujui dan stok difinalisasi.' : 'Outbound ditolak. Stok tidak berubah.')));
           } catch (e) { if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text('Gagal memutuskan outbound: $e'))); }
         }
@@ -1952,6 +1963,7 @@ class _OutboundPageState extends State<OutboundPage> {
                                 '${row['transaction_no']} · ${row['sku_code']} ${row['sku_name']}',
                                 style: const TextStyle(fontWeight: FontWeight.bold),
                               ),
+                              Text('Status: ${row['status']}'),
                               Text('Pallet ${row['pallet_id']} · Diminta ${row['quantity']} · ${row['weight_kg']} kg'),
                               Text('Stok saat review: ${row['available_quantity']} · ${row['available_weight']} kg'),
                               if ('${row['notes']}'.trim().isNotEmpty)
@@ -1978,21 +1990,13 @@ class _OutboundPageState extends State<OutboundPage> {
                                 }),
                               ],
                               const SizedBox(height: 8),
-                              Wrap(
-                                spacing: 8,
-                                children: [
-                                  OutlinedButton.icon(
-                                    onPressed: () => decide(row, 'reject'),
-                                    icon: const Icon(Icons.close),
-                                    label: const Text('Reject'),
-                                  ),
-                                  FilledButton.icon(
-                                    onPressed: () => decide(row, 'approve'),
-                                    icon: const Icon(Icons.check),
-                                    label: const Text('Approve & finalisasi'),
-                                  ),
-                                ],
-                              ),
+                              if ('${row['status']}'.toUpperCase() == 'DRAFT') OutlinedButton.icon(onPressed: () => decide(row, 'submit'), icon: const Icon(Icons.send), label: const Text('Kirim verifikasi')),
+                              if ('${row['status']}'.toUpperCase() == 'PENDING') Wrap(spacing: 8, children: [
+                                OutlinedButton.icon(onPressed: () => decide(row, 'reject'), icon: const Icon(Icons.close), label: const Text('Reject')),
+                                FilledButton.icon(onPressed: () => decide(row, 'approve'), icon: const Icon(Icons.check), label: const Text('Approve & finalisasi')),
+                              ]),
+                              if ('${row['status']}'.toUpperCase() == 'APPROVED') FilledButton.icon(onPressed: () => decide(row, 'complete'), icon: const Icon(Icons.task_alt), label: const Text('Tandai Completed')),
+                              if ('${row['status']}'.toUpperCase() == 'REJECTED' && '${row['decision_note'] ?? ''}'.trim().isNotEmpty) Text('Alasan: ${row['decision_note']}'),
                             ],
                           ),
                         ),
@@ -2108,9 +2112,13 @@ class _OutboundPageState extends State<OutboundPage> {
                       const Text('Checklist outbound', style: TextStyle(fontWeight: FontWeight.w600)),
                       ...checks.keys.map((label) => CheckboxListTile(contentPadding: EdgeInsets.zero, controlAffinity: ListTileControlAffinity.trailing, title: Text(label), value: checks[label], onChanged: saving ? null : (v) => setState(() => checks[label] = v ?? false))),
                       const SizedBox(height: 8),
-                      SizedBox(width: double.infinity, child: FilledButton.icon(onPressed: saving ? null : _submitOutbound, icon: saving ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.output), label: Text(saving ? 'Mengirim...' : 'Ajukan outbound untuk validasi'))),
+                      Row(children: [
+                        Expanded(child: OutlinedButton.icon(onPressed: saving ? null : () => _submitOutbound(asDraft: true), icon: const Icon(Icons.save_outlined), label: const Text('Simpan Draft'))),
+                        const SizedBox(width: 8),
+                        Expanded(child: FilledButton.icon(onPressed: saving ? null : () => _submitOutbound(), icon: saving ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.output), label: Text(saving ? 'Mengirim...' : 'Kirim verifikasi'))),
+                      ]),
                       const SizedBox(height: 8),
-                      const Text('Pengajuan berstatus PENDING. Stok baru dikurangi setelah Warehouse Supervisor menyetujui transaksi. FIFO ditampilkan berdasarkan waktu penerimaan terlama.', style: TextStyle(fontSize: 12)),
+                      const Text('Draft dapat disimpan sebelum checklist lengkap. Kirim verifikasi hanya setelah checklist lengkap. Stok baru berkurang setelah supervisor menyetujui transaksi.', style: TextStyle(fontSize: 12)),
                     ],
                   ]))),
                   const SizedBox(height: 16),

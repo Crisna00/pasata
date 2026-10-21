@@ -23,21 +23,33 @@ func (a *App) ensureOutboundValidationSchema(ctx context.Context) error {
   weight_kg NUMERIC(18,4) NOT NULL CHECK(weight_kg >= 0),
   notes TEXT NOT NULL DEFAULT '',
   checklist JSONB NOT NULL DEFAULT '[]'::jsonb,
-  status TEXT NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING','APPROVED','REJECTED')),
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK(status IN ('DRAFT','PENDING','APPROVED','REJECTED','COMPLETED')),
   requested_by BIGINT,
   decided_by BIGINT,
   decision_note TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   decided_at TIMESTAMPTZ
  )`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Upgrade databases created by earlier PASATA versions.
+	_, err = a.DB.Exec(ctx, `ALTER TABLE outbound_validation_requests DROP CONSTRAINT IF EXISTS outbound_validation_requests_status_check`)
+	if err != nil {
+		return err
+	}
+	_, err = a.DB.Exec(ctx, `ALTER TABLE outbound_validation_requests ADD CONSTRAINT outbound_validation_requests_status_check CHECK(status IN ('DRAFT','PENDING','APPROVED','REJECTED','COMPLETED'))`)
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "already exists") {
+		return err
+	}
+	return nil
 }
 func (a *App) outboundTransactionsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	if err := a.ensureOutboundValidationSchema(ctx); err != nil {
 		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
+		layoutError(w, err)
 		return
 	}
 	session, ok := a.sessionFromRequest(r)
@@ -66,7 +78,7 @@ func (a *App) outboundTransactionsHandler(w http.ResponseWriter, r *http.Request
 			var received time.Time
 			if err := rows.Scan(&id, &no, &itemID, &qty, &weight, &notes, &checklist, &status, &reqBy, &decBy, &decision, &created, &decided, &skuID, &code, &name, &palletID, &availQty, &availWeight, &batch, &received); err != nil {
 				log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
+				layoutError(w, err)
 				return
 			}
 			var ck any
@@ -102,15 +114,29 @@ func (a *App) outboundTransactionsHandler(w http.ResponseWriter, r *http.Request
 		}
 		checklist := b["checklist"]
 		arr, ok := checklist.([]any)
-		if !ok || len(arr) == 0 {
-			authError(w, 400, "Checklist outbound wajib diisi")
+		if !ok {
+			arr = []any{}
+			checklist = arr
+		}
+		status := strings.ToUpper(strField(b, "status"))
+		if status == "" {
+			status = "PENDING"
+		}
+		if status != "DRAFT" && status != "PENDING" {
+			authError(w, 400, "Status awal hanya boleh DRAFT atau PENDING")
 			return
 		}
-		for _, v := range arr {
-			m, ok := v.(map[string]any)
-			if !ok || m["passed"] != true {
-				authError(w, 400, "Semua checklist outbound harus lolos sebelum diajukan")
+		if status == "PENDING" {
+			if len(arr) == 0 {
+				authError(w, 400, "Checklist outbound wajib diisi")
 				return
+			}
+			for _, v := range arr {
+				m, ok := v.(map[string]any)
+				if !ok || m["passed"] != true {
+					authError(w, 400, "Semua checklist outbound harus lolos sebelum diajukan")
+					return
+				}
 			}
 		}
 		tx, err := a.DB.Begin(ctx)
@@ -147,7 +173,7 @@ func (a *App) outboundTransactionsHandler(w http.ResponseWriter, r *http.Request
 		raw, _ := json.Marshal(checklist)
 		no := fmt.Sprintf("OUT-%s-%d", time.Now().Format("20060102-150405"), itemID)
 		var id int64
-		err = tx.QueryRow(ctx, `INSERT INTO outbound_validation_requests(transaction_no,pallet_item_id,quantity,weight_kg,notes,checklist,requested_by) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7) RETURNING id`, no, itemID, qty, weight, strField(b, "notes"), string(raw), session.UserID).Scan(&id)
+		err = tx.QueryRow(ctx, `INSERT INTO outbound_validation_requests(transaction_no,pallet_item_id,quantity,weight_kg,notes,checklist,status,requested_by) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8) RETURNING id`, no, itemID, qty, weight, strField(b, "notes"), string(raw), status, session.UserID).Scan(&id)
 		if err != nil {
 			log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
 			layoutError(w, err)
@@ -158,7 +184,11 @@ func (a *App) outboundTransactionsHandler(w http.ResponseWriter, r *http.Request
 			layoutError(w, err)
 			return
 		}
-		writeJSON(w, 201, map[string]any{"id": id, "transaction_no": no, "status": "PENDING", "message": "Pengajuan outbound menunggu validasi Warehouse Supervisor"})
+		message := "Draft outbound tersimpan"
+		if status == "PENDING" {
+			message = "Pengajuan outbound menunggu validasi Warehouse Supervisor"
+		}
+		writeJSON(w, 201, map[string]any{"id": id, "transaction_no": no, "status": status, "message": message})
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		authError(w, 405, "Method tidak diizinkan")
@@ -169,7 +199,7 @@ func (a *App) outboundTransactionActionHandler(w http.ResponseWriter, r *http.Re
 	defer cancel()
 	if err := a.ensureOutboundValidationSchema(ctx); err != nil {
 		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
+		layoutError(w, err)
 		return
 	}
 	session, ok := a.sessionFromRequest(r)
@@ -178,10 +208,6 @@ func (a *App) outboundTransactionActionHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 	role := strings.ToUpper(session.RoleCode)
-	if role != "SUPER_ADMIN" && role != "WAREHOUSE_ADMIN" && role != "WAREHOUSE_SUPERVISOR" {
-		authError(w, 403, "Hanya Warehouse Supervisor yang dapat memutuskan outbound")
-		return
-	}
 	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/outbound-transactions/"), "/"), "/")
 	if len(parts) != 2 {
 		authError(w, 404, "Endpoint outbound tidak ditemukan")
@@ -193,6 +219,33 @@ func (a *App) outboundTransactionActionHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 	action := strings.ToLower(parts[1])
+	isSupervisor := role == "SUPER_ADMIN" || role == "WAREHOUSE_ADMIN" || role == "WAREHOUSE_SUPERVISOR"
+	isOperator := role == "SUPER_ADMIN" || role == "WAREHOUSE_ADMIN" || role == "WAREHOUSE_OPERATOR"
+	if action == "submit" || action == "complete" {
+		if !isOperator {
+			authError(w, 403, "Aksi hanya untuk Warehouse Operator")
+			return
+		}
+		from, to := "DRAFT", "PENDING"
+		if action == "complete" {
+			from, to = "APPROVED", "COMPLETED"
+		}
+		res, e := a.DB.Exec(ctx, `UPDATE outbound_validation_requests SET status=$1 WHERE id=$2 AND status=$3`, to, id, from)
+		if e != nil {
+			layoutError(w, e)
+			return
+		}
+		if res.RowsAffected() == 0 {
+			authError(w, 409, "Status transaksi tidak sesuai untuk aksi ini")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"id": id, "status": to})
+		return
+	}
+	if !isSupervisor {
+		authError(w, 403, "Hanya Warehouse Supervisor yang dapat memutuskan outbound")
+		return
+	}
 	if action != "approve" && action != "reject" {
 		authError(w, 404, "Aksi tidak dikenal")
 		return
@@ -206,7 +259,7 @@ func (a *App) outboundTransactionActionHandler(w http.ResponseWriter, r *http.Re
 	tx, err := a.DB.Begin(ctx)
 	if err != nil {
 		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
+		layoutError(w, err)
 		return
 	}
 	defer tx.Rollback(ctx)
@@ -216,7 +269,7 @@ func (a *App) outboundTransactionActionHandler(w http.ResponseWriter, r *http.Re
 	err = tx.QueryRow(ctx, `SELECT pallet_item_id,quantity,weight_kg,status FROM outbound_validation_requests WHERE id=$1 FOR UPDATE`, id).Scan(&itemID, &qty, &weight, &status)
 	if err != nil {
 		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
+		layoutError(w, err)
 		return
 	}
 	if status != "PENDING" {
@@ -248,7 +301,7 @@ func (a *App) outboundTransactionActionHandler(w http.ResponseWriter, r *http.Re
 	err = tx.QueryRow(ctx, `SELECT sku_id,quantity,weight_kg,COALESCE(received_at,NOW()) FROM pallet_items WHERE id=$1 AND status='AVAILABLE' FOR UPDATE`, itemID).Scan(&skuID, &beforeQty, &beforeWeight, &received)
 	if err != nil {
 		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
+		layoutError(w, err)
 		return
 	}
 	if qty > beforeQty || weight > beforeWeight+0.0001 {
@@ -263,7 +316,7 @@ func (a *App) outboundTransactionActionHandler(w http.ResponseWriter, r *http.Re
 	}
 	if err != nil && err != pgx.ErrNoRows {
 		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
+		layoutError(w, err)
 		return
 	}
 	afterQty := beforeQty - qty
@@ -280,22 +333,22 @@ func (a *App) outboundTransactionActionHandler(w http.ResponseWriter, r *http.Re
 	}
 	if _, err = tx.Exec(ctx, `UPDATE pallet_items SET quantity=$1,weight_kg=$2,status=$3,updated_at=NOW() WHERE id=$4`, afterQty, afterWeight, newStatus, itemID); err != nil {
 		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
+		layoutError(w, err)
 		return
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO pallet_item_histories(pallet_item_id,action_type,qty_before,qty_change,qty_after,weight_before,weight_change,weight_after,reference_type,performed_by,notes) VALUES($1,'OUTBOUND',$2,$3,$4,$5,$6,$7,'OUTBOUND_TRANSACTION',$8,$9)`, itemID, beforeQty, -qty, afterQty, beforeWeight, -weight, afterWeight, session.UserID, nullString(decisionNote)); err != nil {
 		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
+		layoutError(w, err)
 		return
 	}
 	if _, err = tx.Exec(ctx, `UPDATE outbound_validation_requests SET status='APPROVED',decided_by=$1,decision_note=$2,decided_at=NOW() WHERE id=$3`, session.UserID, decisionNote, id); err != nil {
 		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
+		layoutError(w, err)
 		return
 	}
 	if err = tx.Commit(ctx); err != nil {
 		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
+		layoutError(w, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"id": id, "status": "APPROVED", "quantity_after": afterQty, "weight_after": afterWeight})
