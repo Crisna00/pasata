@@ -9,3 +9,6 @@ Pasang semua file Go dalam folder ini bersama-sama. Pertahankan file .env dan da
 Jalankan backend dari folder berisi go.mod dengan go run . . Lalu jalankan Flutter seperti biasa.
 
 Catatan: saya tidak dapat menjalankan build Flutter/Go terhadap database lokal pengguna di sini; uji dan periksa log terminal jika masih ada error.
+
+
+Tambahan UI: Gateway Outbound kini memiliki bagian Riwayat outbound di bawah form. Setiap transaksi dapat dibuka untuk melihat jumlah/berat keluar, pallet/lokasi/batch, waktu pengajuan/keputusan, catatan, status, dan user ID pengaju/pemutus. Riwayat dimuat dari GET /api/outbound-transactions dan dapat diperbarui dengan tombol refresh.

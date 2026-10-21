@@ -1643,6 +1643,9 @@ class _OutboundPageState extends State<OutboundPage> {
   String search = '';
   List<Map<String, dynamic>> pallets = [];
   List<Map<String, dynamic>> stockItems = [];
+  List<Map<String, dynamic>> outboundHistory = [];
+  bool historyLoading = false;
+  String? historyError;
   Map<String, dynamic>? selectedItem;
   final quantityController = TextEditingController();
   final weightController = TextEditingController();
@@ -1711,6 +1714,46 @@ class _OutboundPageState extends State<OutboundPage> {
     }
     if (decoded is! List) throw Exception('Respons $path bukan daftar data.');
     return decoded.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  Future<void> loadHistory() async {
+    if (mounted) setState(() { historyLoading = true; historyError = null; });
+    try {
+      final rows = await _getList('outbound-transactions');
+      rows.sort((a, b) {
+        final aDate = DateTime.tryParse(_str(a, 'created_at', '')) ?? DateTime(1970);
+        final bDate = DateTime.tryParse(_str(b, 'created_at', '')) ?? DateTime(1970);
+        return bDate.compareTo(aDate);
+      });
+      if (!mounted) return;
+      setState(() {
+        outboundHistory = rows;
+        historyLoading = false;
+        historyError = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        historyLoading = false;
+        historyError = '$e';
+      });
+    }
+  }
+
+  String _formatHistoryDate(dynamic value) {
+    final parsed = DateTime.tryParse('$value');
+    if (parsed == null) return value == null ? '-' : '$value';
+    final local = parsed.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(local.day)}-${two(local.month)}-${local.year} ${two(local.hour)}:${two(local.minute)}';
+  }
+
+  Color _historyStatusColor(String status) {
+    switch (status.toUpperCase()) {
+      case 'APPROVED': return Colors.green;
+      case 'REJECTED': return Colors.red;
+      default: return Colors.orange;
+    }
   }
 
   Future<void> load() async {
@@ -1835,6 +1878,7 @@ class _OutboundPageState extends State<OutboundPage> {
         throw Exception('$message (HTTP ${response.statusCode})');
       }
       await load();
+      await loadHistory();
       if (mounted) {
         setState(() {
           selectedItem = null;
@@ -1885,7 +1929,7 @@ class _OutboundPageState extends State<OutboundPage> {
             final res = await http.post(Uri.parse('$apiBaseUrl/outbound-transactions/${row['id']}/$action'), headers: apiHeaders, body: jsonEncode({'reason': reason})).timeout(const Duration(seconds: 20));
             dynamic data; try { data = jsonDecode(res.body); } catch (_) { data = res.body; }
             if (res.statusCode < 200 || res.statusCode >= 300) throw Exception(data is Map ? (data['error'] ?? res.body) : data.toString());
-            rows.removeWhere((x) => x['id'] == row['id']); refreshDialog(() {}); await load();
+            rows.removeWhere((x) => x['id'] == row['id']); refreshDialog(() {}); await load(); await loadHistory();
             if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text(action == 'approve' ? 'Outbound disetujui dan stok difinalisasi.' : 'Outbound ditolak. Stok tidak berubah.')));
           } catch (e) { if (mounted) ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(content: Text('Gagal memutuskan outbound: $e'))); }
         }
@@ -1971,6 +2015,7 @@ class _OutboundPageState extends State<OutboundPage> {
   void initState() {
     super.initState();
     load();
+    loadHistory();
   }
 
   @override
@@ -1996,7 +2041,7 @@ class _OutboundPageState extends State<OutboundPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Gateway Outbound'),
-        actions: [IconButton(tooltip: 'Review outbound', onPressed: saving ? null : _reviewOutbound, icon: const Icon(Icons.fact_check_outlined)), IconButton(tooltip: 'Muat ulang', onPressed: saving ? null : load, icon: const Icon(Icons.refresh))],
+        actions: [IconButton(tooltip: 'Review outbound', onPressed: saving ? null : _reviewOutbound, icon: const Icon(Icons.fact_check_outlined)), IconButton(tooltip: 'Muat ulang', onPressed: saving ? null : () async { await load(); await loadHistory(); }, icon: const Icon(Icons.refresh))],
       ),
       drawer: const PasataNavigationDrawer(activeMenu: 'Barang Keluar'),
       body: loading
@@ -2068,7 +2113,114 @@ class _OutboundPageState extends State<OutboundPage> {
                       const Text('Pengajuan berstatus PENDING. Stok baru dikurangi setelah Warehouse Supervisor menyetujui transaksi. FIFO ditampilkan berdasarkan waktu penerimaan terlama.', style: TextStyle(fontSize: 12)),
                     ],
                   ]))),
+                  const SizedBox(height: 16),
+                  Card(
+                    elevation: 0,
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Expanded(
+                                child: Text('Riwayat outbound', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                              ),
+                              IconButton(
+                                tooltip: 'Muat ulang riwayat',
+                                onPressed: historyLoading ? null : loadHistory,
+                                icon: const Icon(Icons.refresh),
+                              ),
+                            ],
+                          ),
+                          const Text('Buka setiap transaksi untuk melihat detail pengeluaran dan hasil finalisasi.'),
+                          const SizedBox(height: 8),
+                          if (historyLoading && outboundHistory.isEmpty)
+                            const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 16),
+                              child: Center(child: CircularProgressIndicator()),
+                            )
+                          else if (historyError != null && outboundHistory.isEmpty)
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Riwayat gagal dimuat: $historyError'),
+                                Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: TextButton.icon(onPressed: loadHistory, icon: const Icon(Icons.refresh), label: const Text('Coba lagi')),
+                                ),
+                              ],
+                            )
+                          else if (outboundHistory.isEmpty)
+                            const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 12),
+                              child: Text('Belum ada riwayat outbound.'),
+                            )
+                          else
+                            ...outboundHistory.map((row) {
+                              final status = _str(row, 'status', 'PENDING').toUpperCase();
+                              final statusColor = _historyStatusColor(status);
+                              final quantity = _double(row, 'quantity');
+                              final weight = _double(row, 'weight_kg');
+                              final unit = _str(row, 'unit', '');
+                              final stockQty = _double(row, 'available_quantity');
+                              final stockWeight = _double(row, 'available_weight');
+                              return Card(
+                                margin: const EdgeInsets.symmetric(vertical: 5),
+                                child: ExpansionTile(
+                                  leading: const Icon(Icons.outbox_outlined),
+                                  title: Text('${_str(row, 'transaction_no', 'Outbound')} · ${_str(row, 'sku_code')} ${_str(row, 'sku_name')}'),
+                                  subtitle: Text('${_formatHistoryDate(row['created_at'])} · Pallet ${_palletCode(row)}'),
+                                  trailing: Chip(
+                                    label: Text(status, style: const TextStyle(color: Colors.white, fontSize: 11)),
+                                    backgroundColor: statusColor,
+                                    side: BorderSide.none,
+                                  ),
+                                  childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                                  children: [
+                                    const Divider(),
+                                    _historyDetailRow('Lokasi', _location(row)),
+                                    _historyDetailRow('Batch', _str(row, 'batch_no')),
+                                    _historyDetailRow('Jumlah keluar', '${quantity.toStringAsFixed(2)}${unit.isEmpty ? '' : ' $unit'}'),
+                                    _historyDetailRow('Berat keluar', '${weight.toStringAsFixed(2)} kg'),
+                                    _historyDetailRow('Stok saat riwayat dimuat', '${stockQty.toStringAsFixed(2)}${unit.isEmpty ? '' : ' $unit'} · ${stockWeight.toStringAsFixed(2)} kg'),
+                                    _historyDetailRow('Waktu pengajuan', _formatHistoryDate(row['created_at'])),
+                                    _historyDetailRow('Waktu keputusan', _formatHistoryDate(row['decided_at'])),
+                                    _historyDetailRow('Catatan pengajuan', _str(row, 'notes', '-')),
+                                    _historyDetailRow('Keputusan supervisor', _str(row, 'decision_note', '-')),
+                                    _historyDetailRow('Pengaju (user ID)', _str(row, 'requested_by', '-')),
+                                    _historyDetailRow('Pemutus (user ID)', _str(row, 'decided_by', '-')),
+                                    if (status == 'APPROVED')
+                                      const Align(alignment: Alignment.centerLeft, child: Padding(padding: EdgeInsets.only(top: 8), child: Text('Finalisasi berhasil: stok telah diproses saat approval.', style: TextStyle(color: Colors.green, fontWeight: FontWeight.w500))),),
+                                    if (status == 'REJECTED')
+                                      const Align(alignment: Alignment.centerLeft, child: Padding(padding: EdgeInsets.only(top: 8), child: Text('Pengajuan ditolak; stok tidak dikurangi.', style: TextStyle(color: Colors.red, fontWeight: FontWeight.w500))),),
+                                  ],
+                                ),
+                              );
+                            }),
+                          if (historyLoading && outboundHistory.isNotEmpty)
+                            const Padding(padding: EdgeInsets.only(top: 8), child: LinearProgressIndicator()),
+                          if (historyError != null && outboundHistory.isNotEmpty)
+                            Padding(padding: const EdgeInsets.only(top: 8), child: Text('Pembaruan riwayat gagal: $historyError', style: const TextStyle(color: Colors.red))),
+                        ],
+                      ),
+                    ),
+                  ),
                 ]),
+    );
+  }
+
+  Widget _historyDetailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 190, child: Text(label, style: const TextStyle(fontWeight: FontWeight.w500))),
+          const SizedBox(width: 8),
+          Expanded(child: Text(value)),
+        ],
+      ),
     );
   }
 }
