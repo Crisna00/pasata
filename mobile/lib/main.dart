@@ -831,6 +831,7 @@ class PasataNavigationDrawer extends StatelessWidget {
       case 'Barang Masuk': page = const InboundPage(); break;
       case 'Barang Keluar': page = const OutboundPage(); break;
       case 'Driver & Armada': page = const DriverFleetPage(); break;
+      case 'Transaction History & Audit': page = const TransactionAuditPage(); break;
       case 'Monitoring': page = const MonitoringPage(); break;
       case 'Register User': page = const RegisterPage(); break;
       default:
@@ -869,6 +870,7 @@ class PasataNavigationDrawer extends StatelessWidget {
         _item(context, 'Barang Masuk', Icons.south_west_rounded),
         _item(context, 'Barang Keluar', Icons.north_east_rounded),
         if (currentUser != null && ['SUPER_ADMIN','WAREHOUSE_ADMIN','WAREHOUSE_OPERATOR'].contains('${currentUser!['role_code']}'.toUpperCase())) _item(context, 'Driver & Armada', Icons.local_shipping_outlined),
+        if (currentUser != null && ['SUPER_ADMIN','MANAGER','WAREHOUSE_SUPERVISOR'].contains('${currentUser!['role_code']}'.toUpperCase())) _item(context, 'Transaction History & Audit', Icons.history_edu_outlined),
         _item(context, 'Monitoring', Icons.monitor_heart_outlined),
         if (currentUser != null && currentUser!['role_code'] == 'SUPER_ADMIN')
           _item(context, 'Register User', Icons.person_add_alt_1_outlined),
@@ -900,6 +902,102 @@ class _DriverFleetPageState extends State<DriverFleetPage> {
   @override void initState(){super.initState();load();}
   @override void dispose(){name.dispose();plate.dispose();kind.dispose();phone.dispose();super.dispose();}
   @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Driver & Armada'),actions:[IconButton(onPressed:load,icon:const Icon(Icons.refresh))]),drawer:const PasataNavigationDrawer(activeMenu:'Driver & Armada'),body:loading?const Center(child:CircularProgressIndicator()):ListView(padding:const EdgeInsets.all(16),children:[Card(child:Padding(padding:const EdgeInsets.all(16),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Tambah driver dan kendaraan',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold)),const SizedBox(height:12),TextField(controller:name,decoration:const InputDecoration(labelText:'Nama driver')),TextField(controller:plate,decoration:const InputDecoration(labelText:'Nomor polisi (Nopol)')),TextField(controller:kind,decoration:const InputDecoration(labelText:'Jenis kendaraan',hintText:'Pickup, Truk, Wingbox, dll.')),TextField(controller:phone,keyboardType:TextInputType.phone,decoration:const InputDecoration(labelText:'Nomor telepon (opsional)')),const SizedBox(height:12),SizedBox(width:double.infinity,child:FilledButton.icon(onPressed:saving?null:save,icon:const Icon(Icons.save),label:Text(saving?'Menyimpan...':'Simpan data armada')))]))),const SizedBox(height:12),const Text('Data driver & armada',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold)),if(error!=null)Text('Gagal memuat: $error'),if(rows.isEmpty&&error==null)const Padding(padding:EdgeInsets.all(16),child:Text('Belum ada data driver.')), ...rows.map((r)=>Card(child:ListTile(leading:Icon(Icons.local_shipping_outlined,color:r['active']==true?Colors.green:Colors.grey),title:Text('${_s(r,'driver_name')} · ${_s(r,'plate_number')}'),subtitle:Text('${_s(r,'vehicle_type')}${_s(r,'phone').isNotEmpty?' · ${_s(r,'phone')}':''}\nStatus: ${r['active']==true?'Aktif':'Nonaktif'}'),isThreeLine:true,trailing:currentUser!=null&&['SUPER_ADMIN','WAREHOUSE_ADMIN'].contains('${currentUser!['role_code']}'.toUpperCase())?IconButton(tooltip:r['active']==true?'Nonaktifkan':'Aktifkan',onPressed:()=>toggle(r),icon:Icon(r['active']==true?Icons.toggle_on:Icons.toggle_off)):null)))]));
+}
+
+
+class TransactionAuditPage extends StatefulWidget {
+  const TransactionAuditPage({super.key});
+  @override State<TransactionAuditPage> createState() => _TransactionAuditPageState();
+}
+class _TransactionAuditPageState extends State<TransactionAuditPage> {
+  bool loading=true; String? error; String filter='Semua';
+  List<Map<String,dynamic>> inbound=[], outbound=[];
+  Future<void> load() async {
+    setState(()=>loading=true); error=null;
+    try {
+      final results=await Future.wait([
+        http.get(Uri.parse('$apiBaseUrl/inbound-transactions'),headers:apiHeaders).timeout(const Duration(seconds:20)),
+        http.get(Uri.parse('$apiBaseUrl/outbound-transactions'),headers:apiHeaders).timeout(const Duration(seconds:20)),
+      ]);
+      dynamic decode(http.Response r) { final d=jsonDecode(r.body); if(r.statusCode<200||r.statusCode>=300) throw Exception('$d (HTTP ${r.statusCode})'); return d; }
+      inbound=List<Map<String,dynamic>>.from((decode(results[0]) as List).whereType<Map>().map((e)=>Map<String,dynamic>.from(e)).map((e)=>{...e,'_kind':'Inbound'}));
+      outbound=List<Map<String,dynamic>>.from((decode(results[1]) as List).whereType<Map>().map((e)=>Map<String,dynamic>.from(e)).map((e)=>{...e,'_kind':'Outbound'}));
+    } catch(e) { error='$e'; }
+    if(mounted)setState(()=>loading=false);
+  }
+  String val(Map<String,dynamic> m,List<String> keys,[String fallback='-']) { for(final k in keys){final v=m[k];if(v!=null&&'$v'.trim().isNotEmpty)return '$v';}return fallback; }
+  String _auditLabel(String key) {
+    const labels = <String, String>{
+      'transaction_no':'Nomor transaksi','transaction_number':'Nomor transaksi','_kind':'Jenis transaksi',
+      'status':'Status','created_at':'Waktu dibuat','createdAt':'Waktu dibuat','arrived_at':'Waktu kedatangan',
+      'created_by':'ID pembuat','created_by_name':'Pembuat','requested_by':'ID pembuat','requested_by_name':'Pembuat',
+      'decided_by':'ID validator','decided_by_name':'Validator','validator_name':'Validator','decided_at':'Waktu validasi',
+      'decision_note':'Catatan validasi','notes':'Catatan','description':'Deskripsi','id':'ID transaksi',
+      'warehouse_id':'ID gudang','warehouse_name':'Nama gudang','supplier_name':'Nama pemasok','reference_doc_no':'Nomor dokumen referensi',
+      'driver_name':'Nama driver','driver_id':'ID driver','plate_number':'Nomor polisi','vehicle_type':'Jenis kendaraan','departure_time':'Waktu keberangkatan',
+      'pallet_id':'ID pallet','pallet_item_id':'ID item pallet','sku':'SKU','sku_name':'Nama barang','quantity':'Kuantitas','weight_kg':'Berat (kg)',
+      'item_count':'Jumlah jenis barang','checklist':'Checklist pemeriksaan','checklist_passed':'Checklist lolos','checklist_total':'Total checklist',
+      'requested_at':'Waktu pengajuan','available_quantity':'Stok tersedia','available_weight_kg':'Berat tersedia',
+      'batch':'Batch','received_at':'Waktu barang diterima','truck_plate':'Nomor polisi kendaraan'
+    };
+    if(labels.containsKey(key)) return labels[key]!;
+    return key.replaceAll('_',' ').split(' ').map((part)=>part.isEmpty?part:'${part[0].toUpperCase()}${part.substring(1)}').join(' ');
+  }
+  String _auditValue(dynamic value) {
+    if(value == null) return '-';
+    if(value is bool) return value ? 'Ya' : 'Tidak';
+    if(value is List) {
+      if(value.isEmpty) return 'Tidak ada';
+      return value.map((item) {
+        if(item is Map) {
+          final label=item['label'] ?? item['name'] ?? item['sku'] ?? 'Item';
+          final passed=item['passed'];
+          if(passed is bool) return '$label: ${passed ? 'Lolos' : 'Belum lolos'}';
+          return '$label: ${item.entries.where((e)=>e.key!='id').map((e)=>'${_auditLabel(e.key)} ${_auditValue(e.value)}').join(', ')}';
+        }
+        return '$item';
+      }).join('\n');
+    }
+    if(value is Map) return value.entries.map((e)=>'${_auditLabel('${e.key}')}: ${_auditValue(e.value)}').join('\n');
+    final raw='$value';
+    if(raw.startsWith('20') && raw.contains('T')) { try { return DateTime.parse(raw).toLocal().toString().replaceFirst('.000',''); } catch (_) {} }
+    return raw;
+  }
+  @override void initState(){super.initState();load();}
+  @override Widget build(BuildContext context) {
+    final all=[...inbound,...outbound]..sort((a,b)=>val(b,['created_at','createdAt']).compareTo(val(a,['created_at','createdAt'])));
+    final shown=filter=='Semua'?all:all.where((r)=>r['_kind']==filter).toList();
+    return Scaffold(appBar:AppBar(title:const Text('Transaction History & Audit'),actions:[IconButton(onPressed:load,icon:const Icon(Icons.refresh))]),drawer:const PasataNavigationDrawer(activeMenu:'Transaction History & Audit'),body:loading?const Center(child:CircularProgressIndicator()):RefreshIndicator(onRefresh:load,child:ListView(padding:const EdgeInsets.all(16),children:[
+      Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Riwayat transaksi', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              const Text('Riwayat inbound dan outbound dari data transaksi yang tersimpan.'),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                value: filter,
+                decoration: const InputDecoration(labelText: 'Jenis transaksi'),
+                items: const [
+                  DropdownMenuItem(value: 'Semua', child: Text('Semua')),
+                  DropdownMenuItem(value: 'Inbound', child: Text('Inbound')),
+                  DropdownMenuItem(value: 'Outbound', child: Text('Outbound')),
+                ],
+                onChanged: (v) => setState(() => filter = v ?? 'Semua'),
+              ),
+            ],
+          ),
+        ),
+      ),
+      if(error!=null)Padding(padding:const EdgeInsets.all(12),child:Text('Gagal memuat riwayat: $error',style:const TextStyle(color:Colors.red))),
+      if(shown.isEmpty&&error==null)const Padding(padding:EdgeInsets.all(20),child:Text('Belum ada riwayat transaksi.')),
+      ...shown.map((r){final kind=val(r,['_kind']);final status=val(r,['status'],'UNKNOWN');return Card(child:ListTile(leading:CircleAvatar(child:Icon(kind=='Inbound'?Icons.south_west:Icons.north_east)),title:Text(val(r,['transaction_no','transaction_number','id'],'Transaksi')),subtitle:Text('$kind · Status: $status\nWaktu: ${val(r,['created_at','createdAt'])}\nPembuat: ${val(r,['requested_by_name','created_by_name','requested_by','created_by'])}\nValidator: ${val(r,['decided_by_name','validator_name','decided_by'])}\nPerubahan: ${val(r,['decision_note','notes','description'],'Tidak ada catatan')}'),isThreeLine:true,onTap:()=>showDialog(context:context,builder:(ctx)=>AlertDialog(title:Text(val(r,['transaction_no','transaction_number','id'],'Detail transaksi')),content:ConstrainedBox(constraints:const BoxConstraints(maxWidth:480,maxHeight:520),child:SingleChildScrollView(child:Column(crossAxisAlignment:CrossAxisAlignment.start,mainAxisSize:MainAxisSize.min,children:r.entries.where((e)=>e.key!='_kind').map((e)=>Padding(padding:const EdgeInsets.symmetric(vertical:6),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(_auditLabel(e.key),style:const TextStyle(fontWeight:FontWeight.w600)),const SizedBox(height:2),SelectableText(_auditValue(e.value))]))).toList()))),actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('Tutup'))]))));}),
+      const SizedBox(height:12),const Card(child:Padding(padding:EdgeInsets.all(14),child:Text('Catatan audit: riwayat inbound/outbound ditampilkan dari API transaksi. Log perubahan per-field, pembatalan transaksi, dan stock adjustment membutuhkan pencatatan audit khusus di backend; tindakan tersebut belum diaktifkan pada halaman ini.')))
+    ])));
+  }
 }
 
 class DashboardPage extends StatelessWidget {
