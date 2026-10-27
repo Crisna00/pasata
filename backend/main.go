@@ -148,6 +148,7 @@ func main() {
 	mux.HandleFunc("/api/outbound-transactions", app.outboundTransactionsHandler)
 	mux.HandleFunc("/api/outbound-transactions/", app.outboundTransactionActionHandler)
 	mux.HandleFunc("/api/drivers", app.driversHandler)
+	mux.HandleFunc("/api/vehicles", app.vehiclesHandler)
 	mux.HandleFunc("/api/pallet-move", app.movePallet)
 	mux.HandleFunc("/api/monitoring/summary", app.monitoringSummaryHandler)
 	mux.HandleFunc("/api/monitoring/fifo", app.monitoringFIFOHandler)
@@ -733,7 +734,7 @@ func cors(next http.Handler) http.Handler {
 
 		}
 
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 

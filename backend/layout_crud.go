@@ -523,8 +523,8 @@ func (a *App) rackSlotsCRUD(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		status := strings.ToUpper(strField(b, "status"))
-		if status != "" && status != "EMPTY" && status != "UNAVAILABLE" && status != "QUARANTINE" && status != "MAINTENANCE" {
-			http.Error(w, "Status slot harus EMPTY, UNAVAILABLE, QUARANTINE, atau MAINTENANCE. Status OCCUPIED ditentukan oleh sistem.", 400)
+		if status != "" && status != "EMPTY" && status != "UNAVAILABLE" {
+			http.Error(w, "Status slot harus EMPTY atau UNAVAILABLE. Status OCCUPIED/MOVING ditentukan oleh sistem.", 400)
 			return
 		}
 		var capacityArg any
