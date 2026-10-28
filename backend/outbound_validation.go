@@ -2,9 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log"
+	
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,51 +12,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Outbound validation: requests remain PENDING until a warehouse supervisor decides.
-func (a *App) ensureOutboundValidationSchema(ctx context.Context) error {
-	if err := a.ensureDriverFleetSchema(ctx); err != nil {
-		return err
-	}
-	_, err := a.DB.Exec(ctx, `CREATE TABLE IF NOT EXISTS outbound_validation_requests (
-  id BIGSERIAL PRIMARY KEY,
-  transaction_no TEXT NOT NULL UNIQUE,
-  pallet_item_id BIGINT NOT NULL REFERENCES pallet_items(id),
-  quantity NUMERIC(18,4) NOT NULL CHECK(quantity > 0),
-  weight_kg NUMERIC(18,4) NOT NULL CHECK(weight_kg >= 0),
-  notes TEXT NOT NULL DEFAULT '',
-  checklist JSONB NOT NULL DEFAULT '[]'::jsonb,
-  status TEXT NOT NULL DEFAULT 'PENDING' CHECK(status IN ('DRAFT','PENDING','APPROVED','REJECTED','COMPLETED')),
-  requested_by BIGINT,
-  decided_by BIGINT,
-  decision_note TEXT NOT NULL DEFAULT '',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  decided_at TIMESTAMPTZ
- )`)
-	if err != nil {
-		return err
-	}
-	if _, err = a.DB.Exec(ctx, `ALTER TABLE outbound_validation_requests ADD COLUMN IF NOT EXISTS driver_id BIGINT REFERENCES warehouse_drivers(id), ADD COLUMN IF NOT EXISTS departure_time TIMESTAMPTZ`); err != nil {
-		return err
-	}
-	// Upgrade databases created by earlier PASATA versions.
-	_, err = a.DB.Exec(ctx, `ALTER TABLE outbound_validation_requests DROP CONSTRAINT IF EXISTS outbound_validation_requests_status_check`)
-	if err != nil {
-		return err
-	}
-	_, err = a.DB.Exec(ctx, `ALTER TABLE outbound_validation_requests ADD CONSTRAINT outbound_validation_requests_status_check CHECK(status IN ('DRAFT','PENDING','APPROVED','REJECTED','COMPLETED'))`)
-	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "already exists") {
-		return err
-	}
-	return nil
-}
+// Outbound API menggunakan tabel outbound_transactions dan outbound_items sesuai Script-1(4).sql.
 func (a *App) outboundTransactionsHandler(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
-	if err := a.ensureOutboundValidationSchema(ctx); err != nil {
-		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-		layoutError(w, err)
-		return
-	}
 	session, ok := a.sessionFromRequest(r)
 	if !ok {
 		authError(w, 401, "Login diperlukan")
@@ -65,34 +23,51 @@ func (a *App) outboundTransactionsHandler(w http.ResponseWriter, r *http.Request
 	}
 	switch r.Method {
 	case http.MethodGet:
-		rows, err := a.DB.Query(ctx, `SELECT t.id,t.transaction_no,t.pallet_item_id,t.quantity,t.weight_kg,t.notes,t.checklist,t.status,t.requested_by,t.decided_by,t.decision_note,t.created_at,t.decided_at,pi.sku_id,COALESCE(s.sku_code,''),COALESCE(s.name,''),pi.pallet_id,pi.quantity AS available_quantity,pi.weight_kg AS available_weight,COALESCE(pi.batch_no,''),COALESCE(pi.received_at,NOW()),t.driver_id,t.departure_time,COALESCE(d.driver_name,''),COALESCE(d.plate_number,''),COALESCE(d.vehicle_type,'') FROM outbound_validation_requests t LEFT JOIN warehouse_drivers d ON d.id=t.driver_id JOIN pallet_items pi ON pi.id=t.pallet_item_id LEFT JOIN skus s ON s.id=pi.sku_id ORDER BY t.created_at DESC`)
+		rows, err := a.DB.Query(ctx, `
+SELECT t.id,t.transaction_no,t.warehouse_id,t.customer_name,t.destination_address,t.reference_doc_no,
+       t.scheduled_at,t.shipped_at,t.status,t.notes,t.created_by,t.validated_by,t.validated_at,t.reject_reason,t.created_at,
+       oi.id,oi.sku_id,COALESCE(s.sku_code,''),COALESCE(s.name,''),oi.pallet_item_id,
+       COALESCE(pi.pallet_id,0),COALESCE(p.pallet_code,''),oi.outbound_type,oi.packaging_type,oi.packaging_qty,
+       oi.qty_requested,oi.qty_picked,oi.weight_kg,oi.is_fifo_compliant,oi.fifo_note,
+       COALESCE(d.name,''),COALESCE(v.plate_number,''),m.departure_at
+FROM outbound_transactions t
+LEFT JOIN outbound_items oi ON oi.outbound_transaction_id=t.id
+LEFT JOIN skus s ON s.id=oi.sku_id
+LEFT JOIN pallet_items pi ON pi.id=oi.pallet_item_id
+LEFT JOIN pallets p ON p.id=pi.pallet_id
+LEFT JOIN manifest_outbounds mo ON mo.outbound_transaction_id=t.id
+LEFT JOIN manifests m ON m.id=mo.manifest_id
+LEFT JOIN drivers d ON d.id=m.driver_id
+LEFT JOIN vehicles v ON v.id=m.vehicle_id
+WHERE ($1=0 OR t.warehouse_id=$1)
+ORDER BY t.created_at DESC,t.id DESC,oi.id`, warehouseFilter(session))
 		if err != nil {
-			log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
 			layoutError(w, err)
 			return
 		}
 		defer rows.Close()
 		out := []map[string]any{}
 		for rows.Next() {
-			var id, itemID, skuID, palletID int64
-			var reqBy, decBy *int64
-			var no, notes, status, decision, code, name, batch string
-			var qty, weight, availQty, availWeight float64
-			var checklist []byte
+			var id, wid, createdBy, itemID, skuID int64
+			var validatedBy, palletItemID *int64
+			var no, customer, status string
+			var destination, refDoc, notes, rejectReason, skuCode, skuName, palletCode, fifoNote, driverName, plate *string
+			var scheduled, shipped, validated, departure *time.Time
 			var created time.Time
-			var decided *time.Time
-			var received time.Time
-			var driverID *int64
-			var departure *time.Time
-			var driverName, plate, vehicleType string
-			if err := rows.Scan(&id, &no, &itemID, &qty, &weight, &notes, &checklist, &status, &reqBy, &decBy, &decision, &created, &decided, &skuID, &code, &name, &palletID, &availQty, &availWeight, &batch, &received, &driverID, &departure, &driverName, &plate, &vehicleType); err != nil {
-				log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
+			var palletID int64
+			var outType, packType *string
+			var packQty int
+			var requested, picked, weight float64
+			var fifo bool
+			if err := rows.Scan(&id, &no, &wid, &customer, &destination, &refDoc, &scheduled, &shipped, &status, &notes, &createdBy, &validatedBy, &validated, &rejectReason, &created, &itemID, &skuID, &skuCode, &skuName, &palletItemID, &palletID, &palletCode, &outType, &packType, &packQty, &requested, &picked, &weight, &fifo, &fifoNote, &driverName, &plate, &departure); err != nil {
 				layoutError(w, err)
 				return
 			}
-			var ck any
-			_ = json.Unmarshal(checklist, &ck)
-			out = append(out, map[string]any{"id": id, "transaction_no": no, "pallet_item_id": itemID, "quantity": qty, "weight_kg": weight, "notes": notes, "checklist": ck, "status": status, "requested_by": reqBy, "decided_by": decBy, "decision_note": decision, "created_at": created, "decided_at": decided, "sku_id": skuID, "sku_code": code, "sku_name": name, "pallet_id": palletID, "available_quantity": availQty, "available_weight": availWeight, "batch_no": batch, "received_at": received, "driver_id": driverID, "departure_time": departure, "driver_name": driverName, "plate_number": plate, "vehicle_type": vehicleType})
+			out = append(out, map[string]any{"id": id, "transaction_no": no, "warehouse_id": wid, "customer_name": customer, "destination_address": destination, "reference_doc_no": refDoc, "scheduled_at": scheduled, "shipped_at": shipped, "status": status, "notes": notes, "created_by": createdBy, "validated_by": validatedBy, "validated_at": validated, "reject_reason": rejectReason, "created_at": created, "outbound_item_id": itemID, "sku_id": skuID, "sku_code": skuCode, "sku_name": skuName, "pallet_item_id": palletItemID, "pallet_id": palletID, "pallet_code": palletCode, "outbound_type": outType, "packaging_type": packType, "packaging_qty": packQty, "quantity": requested, "qty_requested": requested, "qty_picked": picked, "weight_kg": weight, "is_fifo_compliant": fifo, "fifo_note": fifoNote, "driver_name": driverName, "plate_number": plate, "departure_time": departure})
+		}
+		if err := rows.Err(); err != nil {
+			layoutError(w, err)
+			return
 		}
 		writeJSON(w, 200, out)
 	case http.MethodPost:
@@ -121,120 +96,121 @@ func (a *App) outboundTransactionsHandler(w http.ResponseWriter, r *http.Request
 			authError(w, 400, "weight_kg tidak valid")
 			return
 		}
-		checklist := b["checklist"]
-		arr, ok := checklist.([]any)
-		if !ok {
-			arr = []any{}
-			checklist = arr
-		}
-		status := strings.ToUpper(strField(b, "status"))
-		if status == "" {
-			status = "PENDING"
-		}
-		if status != "DRAFT" && status != "PENDING" {
-			authError(w, 400, "Status awal hanya boleh DRAFT atau PENDING")
+		warehouseID, err := parseID(fmt.Sprint(b["warehouse_id"]))
+		if err != nil {
+			authError(w, 400, "warehouse_id wajib diisi")
 			return
 		}
-		if status == "PENDING" {
-			if len(arr) == 0 {
-				authError(w, 400, "Checklist outbound wajib diisi")
-				return
-			}
-			for _, v := range arr {
-				m, ok := v.(map[string]any)
-				if !ok || m["passed"] != true {
-					authError(w, 400, "Semua checklist outbound harus lolos sebelum diajukan")
-					return
-				}
-			}
+		customer := strings.TrimSpace(strField(b, "customer_name"))
+		if customer == "" {
+			authError(w, 400, "customer_name wajib diisi")
+			return
+		}
+		if session.WarehouseID != nil && *session.WarehouseID != warehouseID && role != "SUPER_ADMIN" && role != "WAREHOUSE_ADMIN" {
+			authError(w, 403, "Transaksi hanya boleh dibuat untuk gudang akun")
+			return
 		}
 		tx, err := a.DB.Begin(ctx)
 		if err != nil {
-			log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
 			layoutError(w, err)
 			return
 		}
 		defer tx.Rollback(ctx)
-		var skuID int64
+		var skuID, palletWarehouseID int64
 		var availableQty, availableWeight float64
-		var received time.Time
-		err = tx.QueryRow(ctx, `SELECT sku_id,quantity,weight_kg,COALESCE(received_at,NOW()) FROM pallet_items WHERE id=$1 AND status='AVAILABLE' FOR UPDATE`, itemID).Scan(&skuID, &availableQty, &availableWeight, &received)
+		var itemStatus string
+		err = tx.QueryRow(ctx, `SELECT pi.sku_id,pi.quantity,pi.weight_kg,pi.status,p.warehouse_id FROM pallet_items pi JOIN pallets p ON p.id=pi.pallet_id WHERE pi.id=$1 FOR UPDATE OF pi`, itemID).Scan(&skuID, &availableQty, &availableWeight, &itemStatus, &palletWarehouseID)
 		if err != nil {
-			log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
-			return
-		}
-		if qty > availableQty || weight > availableWeight+0.0001 {
-			authError(w, 409, "Quantity/weight melebihi stok tersedia")
-			return
-		}
-		var fifoID int64
-		err = tx.QueryRow(ctx, `SELECT id FROM pallet_items WHERE sku_id=$1 AND status='AVAILABLE' AND quantity>0 ORDER BY received_at NULLS LAST,id LIMIT 1`, skuID).Scan(&fifoID)
-		if err == nil && fifoID != itemID {
-			authError(w, 409, fmt.Sprintf("Validasi FIFO gagal: pallet_item_id %d harus dikeluarkan lebih dahulu", fifoID))
-			return
-		}
-		if err != nil && err != pgx.ErrNoRows {
-			log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-			layoutError(w, err)
-			return
-		}
-		raw, _ := json.Marshal(checklist)
-		var driverID any
-		if v := strings.TrimSpace(fmt.Sprint(b["driver_id"])); v != "" && v != "<nil>" {
-			parsed, e := parseID(v)
-			if e != nil {
-				authError(w, 400, "driver_id tidak valid")
+			if err == pgx.ErrNoRows {
+				authError(w, 404, "Isi pallet tidak ditemukan")
 				return
 			}
-			driverID = parsed
+			layoutError(w, err)
+			return
 		}
-		var departure any
-		if v := strings.TrimSpace(strField(b, "departure_time")); v != "" {
+		if itemStatus != "AVAILABLE" || qty > availableQty || weight > availableWeight+0.0001 {
+			authError(w, 409, "Stok tidak tersedia atau jumlah/berat melebihi stok")
+			return
+		}
+		if palletWarehouseID != warehouseID {
+			authError(w, 400, "Gudang transaksi tidak sesuai dengan gudang pallet")
+			return
+		}
+		status := strings.ToUpper(strings.TrimSpace(strField(b, "status")))
+		if status == "" {
+			status = "DRAFT"
+		}
+		if status != "DRAFT" && status != "WAITING_VERIFICATION" {
+			authError(w, 400, "Status awal harus DRAFT atau WAITING_VERIFICATION")
+			return
+		}
+		no := fmt.Sprintf("OUT-%s-%d", time.Now().Format("20060102-150405"), time.Now().UnixNano()%100000)
+		var destination, refDoc, notes any
+		if v := strings.TrimSpace(strField(b, "destination_address")); v != "" {
+			destination = v
+		}
+		if v := strings.TrimSpace(strField(b, "reference_doc_no")); v != "" {
+			refDoc = v
+		}
+		if v := strings.TrimSpace(strField(b, "notes")); v != "" {
+			notes = v
+		}
+		var scheduled any
+		if v := strings.TrimSpace(strField(b, "scheduled_at")); v != "" {
 			parsed, e := time.Parse(time.RFC3339, v)
 			if e != nil {
-				authError(w, 400, "departure_time harus format ISO/RFC3339")
+				authError(w, 400, "scheduled_at harus format RFC3339")
 				return
 			}
-			departure = parsed
+			scheduled = parsed
 		}
-		no := fmt.Sprintf("OUT-%s-%d", time.Now().Format("20060102-150405"), itemID)
 		var id int64
-		err = tx.QueryRow(ctx, `INSERT INTO outbound_validation_requests(transaction_no,pallet_item_id,quantity,weight_kg,notes,checklist,status,requested_by,driver_id,departure_time) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10) RETURNING id`, no, itemID, qty, weight, strField(b, "notes"), string(raw), status, session.UserID, driverID, departure).Scan(&id)
+		err = tx.QueryRow(ctx, `INSERT INTO outbound_transactions(transaction_no,warehouse_id,customer_name,destination_address,reference_doc_no,scheduled_at,status,notes,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, no, warehouseID, customer, destination, refDoc, scheduled, status, notes, session.UserID).Scan(&id)
 		if err != nil {
-			log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
+			layoutError(w, err)
+			return
+		}
+		outType := strings.ToUpper(strField(b, "outbound_type"))
+		if outType != "FULL" {
+			outType = "PARTIAL"
+		}
+		pack := strings.ToUpper(strField(b, "packaging_type"))
+		if pack == "" {
+			pack = "CARTON"
+		}
+		if pack != "CARTON" && pack != "SACK" && pack != "BOX" && pack != "OTHER" {
+			authError(w, 400, "packaging_type tidak valid")
+			return
+		}
+		packQty := intField(b, "packaging_qty", 0)
+		if packQty < 0 {
+			authError(w, 400, "packaging_qty tidak boleh negatif")
+			return
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO outbound_items(outbound_transaction_id,sku_id,pallet_item_id,outbound_type,packaging_type,packaging_qty,qty_requested,qty_picked,weight_kg,is_fifo_compliant,notes) VALUES($1,$2,$3,$4,$5,$6,$7,0,$8,TRUE,$9)`, id, skuID, itemID, outType, pack, packQty, qty, weight, notes)
+		if err != nil {
 			layoutError(w, err)
 			return
 		}
 		if err = tx.Commit(ctx); err != nil {
-			log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
 			layoutError(w, err)
 			return
 		}
-		message := "Draft outbound tersimpan"
-		if status == "PENDING" {
-			message = "Pengajuan outbound menunggu validasi Warehouse Supervisor"
-		}
-		writeJSON(w, 201, map[string]any{"id": id, "transaction_no": no, "status": status, "message": message})
+		writeJSON(w, 201, map[string]any{"id": id, "transaction_no": no, "status": status, "message": "Draft outbound tersimpan"})
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		authError(w, 405, "Method tidak diizinkan")
 	}
 }
+
 func (a *App) outboundTransactionActionHandler(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	if err := a.ensureOutboundValidationSchema(ctx); err != nil {
-		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-		layoutError(w, err)
-		return
-	}
 	session, ok := a.sessionFromRequest(r)
 	if !ok {
 		authError(w, 401, "Login diperlukan")
 		return
 	}
-	role := strings.ToUpper(session.RoleCode)
 	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/outbound-transactions/"), "/"), "/")
 	if len(parts) != 2 {
 		authError(w, 404, "Endpoint outbound tidak ditemukan")
@@ -246,6 +222,7 @@ func (a *App) outboundTransactionActionHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 	action := strings.ToLower(parts[1])
+	role := strings.ToUpper(session.RoleCode)
 	isSupervisor := role == "SUPER_ADMIN" || role == "WAREHOUSE_ADMIN" || role == "WAREHOUSE_SUPERVISOR"
 	isOperator := role == "SUPER_ADMIN" || role == "WAREHOUSE_ADMIN" || role == "WAREHOUSE_OPERATOR"
 	if action == "submit" || action == "complete" {
@@ -253,11 +230,13 @@ func (a *App) outboundTransactionActionHandler(w http.ResponseWriter, r *http.Re
 			authError(w, 403, "Aksi hanya untuk Warehouse Operator")
 			return
 		}
-		from, to := "DRAFT", "PENDING"
+		from, to := "DRAFT", "WAITING_VERIFICATION"
+		query := `UPDATE outbound_transactions SET status=$1 WHERE id=$2 AND status=$3`
 		if action == "complete" {
 			from, to = "APPROVED", "COMPLETED"
+			query = `UPDATE outbound_transactions SET status=$1,completed_at=NOW(),shipped_at=COALESCE(shipped_at,NOW()),updated_at=NOW() WHERE id=$2 AND status=$3`
 		}
-		res, e := a.DB.Exec(ctx, `UPDATE outbound_validation_requests SET status=$1 WHERE id=$2 AND status=$3`, to, id, from)
+		res, e := a.DB.Exec(ctx, query, to, id, from)
 		if e != nil {
 			layoutError(w, e)
 			return
@@ -282,101 +261,123 @@ func (a *App) outboundTransactionActionHandler(w http.ResponseWriter, r *http.Re
 		authError(w, 400, err.Error())
 		return
 	}
-	decisionNote := strField(b, "reason")
+	reason := strings.TrimSpace(strField(b, "reason"))
 	tx, err := a.DB.Begin(ctx)
 	if err != nil {
-		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
 		layoutError(w, err)
 		return
 	}
 	defer tx.Rollback(ctx)
-	var itemID int64
-	var qty, weight float64
 	var status string
-	err = tx.QueryRow(ctx, `SELECT pallet_item_id,quantity,weight_kg,status FROM outbound_validation_requests WHERE id=$1 FOR UPDATE`, id).Scan(&itemID, &qty, &weight, &status)
+	var warehouseID int64
+	err = tx.QueryRow(ctx, `SELECT status,warehouse_id FROM outbound_transactions WHERE id=$1 FOR UPDATE`, id).Scan(&status, &warehouseID)
 	if err != nil {
-		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
+		if err == pgx.ErrNoRows {
+			authError(w, 404, "Transaksi outbound tidak ditemukan")
+			return
+		}
 		layoutError(w, err)
 		return
 	}
-	if status != "PENDING" {
-		authError(w, 409, "Transaksi sudah diputuskan dan tidak dapat diubah lagi")
+	if session.WarehouseID != nil && *session.WarehouseID != warehouseID && role != "SUPER_ADMIN" && role != "WAREHOUSE_ADMIN" {
+		authError(w, 403, "Tidak memiliki akses ke gudang transaksi")
+		return
+	}
+	if status != "WAITING_VERIFICATION" {
+		authError(w, 409, "Transaksi harus berstatus WAITING_VERIFICATION untuk diputuskan")
 		return
 	}
 	if action == "reject" {
-		if strings.TrimSpace(decisionNote) == "" {
-			authError(w, 400, "Alasan reject wajib diisi")
+		if reason == "" {
+			authError(w, 400, "Alasan penolakan wajib diisi")
 			return
 		}
-		_, err = tx.Exec(ctx, `UPDATE outbound_validation_requests SET status='REJECTED',decided_by=$1,decision_note=$2,decided_at=NOW() WHERE id=$3`, session.UserID, decisionNote, id)
+		_, err = tx.Exec(ctx, `UPDATE outbound_transactions SET status='REJECTED',validated_by=$1,validated_at=NOW(),reject_reason=$2,updated_at=NOW() WHERE id=$3`, session.UserID, reason, id)
 		if err != nil {
-			log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
 			layoutError(w, err)
 			return
 		}
 		if err = tx.Commit(ctx); err != nil {
-			log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
 			layoutError(w, err)
 			return
 		}
 		writeJSON(w, 200, map[string]any{"id": id, "status": "REJECTED"})
 		return
 	}
-	var skuID int64
-	var beforeQty, beforeWeight float64
-	var received time.Time
-	err = tx.QueryRow(ctx, `SELECT sku_id,quantity,weight_kg,COALESCE(received_at,NOW()) FROM pallet_items WHERE id=$1 AND status='AVAILABLE' FOR UPDATE`, itemID).Scan(&skuID, &beforeQty, &beforeWeight, &received)
+	rows, err := tx.Query(ctx, `SELECT oi.id,oi.pallet_item_id,oi.qty_requested,oi.weight_kg,pi.sku_id,pi.quantity,pi.weight_kg,pi.received_at FROM outbound_items oi JOIN pallet_items pi ON pi.id=oi.pallet_item_id WHERE oi.outbound_transaction_id=$1 FOR UPDATE OF pi`, id)
 	if err != nil {
-		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
 		layoutError(w, err)
 		return
 	}
-	if qty > beforeQty || weight > beforeWeight+0.0001 {
-		authError(w, 409, "Stok berubah; quantity/weight harus divalidasi ulang")
+	type line struct {
+		outboundItemID, itemID, skuID        int64
+		qty, weight, beforeQty, beforeWeight float64
+		received                             time.Time
+	}
+	lines := []line{}
+	for rows.Next() {
+		var l line
+		if e := rows.Scan(&l.outboundItemID, &l.itemID, &l.qty, &l.weight, &l.skuID, &l.beforeQty, &l.beforeWeight, &l.received); e != nil {
+			rows.Close()
+			layoutError(w, e)
+			return
+		}
+		lines = append(lines, l)
+	}
+	rows.Close()
+	if len(lines) == 0 {
+		authError(w, 409, "Transaksi tidak memiliki item outbound")
 		return
 	}
-	var fifoID int64
-	err = tx.QueryRow(ctx, `SELECT id FROM pallet_items WHERE sku_id=$1 AND status='AVAILABLE' AND quantity>0 ORDER BY received_at NULLS LAST,id LIMIT 1`, skuID).Scan(&fifoID)
-	if err == nil && fifoID != itemID {
-		authError(w, 409, fmt.Sprintf("Approval ditolak: FIFO belum terpenuhi; item %d harus keluar lebih dahulu", fifoID))
-		return
+	for _, l := range lines {
+		if l.qty > l.beforeQty || l.weight > l.beforeWeight+0.0001 {
+			authError(w, 409, "Stok berubah; kuantitas/berat perlu diperiksa ulang")
+			return
+		}
+		var fifoID int64
+		e := tx.QueryRow(ctx, `SELECT id FROM pallet_items WHERE sku_id=$1 AND status='AVAILABLE' AND quantity>0 ORDER BY received_at NULLS LAST,id LIMIT 1`, l.skuID).Scan(&fifoID)
+		if e == nil && fifoID != l.itemID {
+			authError(w, 409, fmt.Sprintf("Validasi FIFO gagal: item pallet %d harus dikeluarkan lebih dahulu", fifoID))
+			return
+		}
+		if e != nil && e != pgx.ErrNoRows {
+			layoutError(w, e)
+			return
+		}
 	}
-	if err != nil && err != pgx.ErrNoRows {
-		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-		layoutError(w, err)
-		return
+	for _, l := range lines {
+		afterQty := l.beforeQty - l.qty
+		afterWeight := l.beforeWeight - l.weight
+		if afterQty < 0.005 {
+			afterQty = 0
+		}
+		if afterWeight < 0.005 {
+			afterWeight = 0
+		}
+		itemStatus := "AVAILABLE"
+		if afterQty == 0 {
+			itemStatus = "DEPLETED"
+		}
+		if _, err = tx.Exec(ctx, `UPDATE pallet_items SET quantity=$1,weight_kg=$2,status=$3,updated_at=NOW() WHERE id=$4`, afterQty, afterWeight, itemStatus, l.itemID); err != nil {
+			layoutError(w, err)
+			return
+		}
+		if _, err = tx.Exec(ctx, `UPDATE outbound_items SET qty_picked=qty_requested,is_fifo_compliant=TRUE,updated_at=NOW() WHERE id=$1`, l.outboundItemID); err != nil {
+			layoutError(w, err)
+			return
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO pallet_item_histories(pallet_item_id,action_type,qty_before,qty_change,qty_after,weight_before,weight_change,weight_after,reference_type,reference_id,performed_by,notes) VALUES($1,'OUTBOUND',$2,$3,$4,$5,$6,$7,'OUTBOUND_TRANSACTION',$8,$9,$10)`, l.itemID, l.beforeQty, -l.qty, afterQty, l.beforeWeight, -l.weight, afterWeight, id, session.UserID, nullString(reason)); err != nil {
+			layoutError(w, err)
+			return
+		}
 	}
-	afterQty := beforeQty - qty
-	afterWeight := beforeWeight - weight
-	if afterQty < 0.005 {
-		afterQty = 0
-	}
-	if afterWeight < 0.005 {
-		afterWeight = 0
-	}
-	newStatus := "AVAILABLE"
-	if afterQty == 0 {
-		newStatus = "DEPLETED"
-	}
-	if _, err = tx.Exec(ctx, `UPDATE pallet_items SET quantity=$1,weight_kg=$2,status=$3,updated_at=NOW() WHERE id=$4`, afterQty, afterWeight, newStatus, itemID); err != nil {
-		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-		layoutError(w, err)
-		return
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO pallet_item_histories(pallet_item_id,action_type,qty_before,qty_change,qty_after,weight_before,weight_change,weight_after,reference_type,performed_by,notes) VALUES($1,'OUTBOUND',$2,$3,$4,$5,$6,$7,'OUTBOUND_TRANSACTION',$8,$9)`, itemID, beforeQty, -qty, afterQty, beforeWeight, -weight, afterWeight, session.UserID, nullString(decisionNote)); err != nil {
-		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
-		layoutError(w, err)
-		return
-	}
-	if _, err = tx.Exec(ctx, `UPDATE outbound_validation_requests SET status='APPROVED',decided_by=$1,decision_note=$2,decided_at=NOW() WHERE id=$3`, session.UserID, decisionNote, id); err != nil {
-		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
+	if _, err = tx.Exec(ctx, `UPDATE outbound_transactions SET status='APPROVED',validated_by=$1,validated_at=NOW(),updated_at=NOW() WHERE id=$2`, session.UserID, id); err != nil {
 		layoutError(w, err)
 		return
 	}
 	if err = tx.Commit(ctx); err != nil {
-		log.Printf("[OUTBOUND VALIDATION] database/transaction error: %v", err)
 		layoutError(w, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"id": id, "status": "APPROVED", "quantity_after": afterQty, "weight_after": afterWeight})
+	writeJSON(w, 200, map[string]any{"id": id, "status": "APPROVED"})
 }
